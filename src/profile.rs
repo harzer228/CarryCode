@@ -1,3 +1,4 @@
+use crate::recent::RecentFolders;
 use age::{
     Decryptor, Encryptor, scrypt,
     secrecy::{ExposeSecret, SecretString},
@@ -14,12 +15,15 @@ use std::{
 
 const MAX_SNAPSHOT: u64 = 2 * 1024 * 1024 * 1024;
 const METADATA: &str = "snapshot.json";
+const MAX_METADATA: usize = 4096;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct Snapshot {
     format: u32,
     id: String,
     revision: u64,
+    #[serde(default, skip_serializing_if = "RecentFolders::is_empty")]
+    recent: RecentFolders,
 }
 
 struct Saved {
@@ -34,7 +38,14 @@ pub struct Profile {
     _lock: File,
     active: Option<Saved>,
     observed: [Option<String>; 2],
+    pub recent: RecentFolders,
     pub work: tempfile::TempDir,
+}
+
+pub enum PasswordChange {
+    Canceled,
+    Saved,
+    VerifyOnReconnect(anyhow::Error),
 }
 
 impl Profile {
@@ -69,9 +80,19 @@ impl Profile {
             fingerprint(&slot_path(&folder, 1))?,
         ];
         let fresh = observed.iter().all(Option::is_none);
+        if fresh {
+            println!(
+                "{}",
+                tr!(
+                    "Создай пароль для профиля на флешке. Запомни его: он понадобится при каждом запуске.",
+                    "Create a password for your USB profile. Remember it: you’ll need it every time you open flashGPT."
+                )
+            );
+        }
         let secret = password(fresh)?;
         let mut work = crate::platform::private_dir()?;
         let mut active: Option<Saved> = None;
+        let mut recent = RecentFolders::default();
         let mut unreadable = false;
         for (slot, hash) in observed.iter().enumerate() {
             if hash.is_none() {
@@ -79,11 +100,16 @@ impl Profile {
             }
             let path = slot_path(&folder, slot);
             let candidate = crate::platform::private_dir()?;
-            match extract(&path, &secret, &marker.id, candidate.path()) {
-                Ok(revision) if active.as_ref().is_none_or(|old| revision > old.revision) => {
+            match extract(&path, &secret, &marker.id, Some(candidate.path())) {
+                Ok(snapshot)
+                    if active
+                        .as_ref()
+                        .is_none_or(|old| snapshot.revision > old.revision) =>
+                {
                     work = candidate;
+                    recent = snapshot.recent;
                     active = Some(Saved {
-                        revision,
+                        revision: snapshot.revision,
                         slot: slot as u8,
                     });
                 }
@@ -124,6 +150,7 @@ impl Profile {
             _lock: lock,
             active,
             observed,
+            recent,
             work,
         })
     }
@@ -142,7 +169,7 @@ impl Profile {
         Ok(())
     }
 
-    pub fn save(&mut self) -> Result<()> {
+    fn checked_folder(&self) -> Result<PathBuf> {
         ensure!(
             crate::bundle::read_marker(&self.root)?.id == self.id,
             "{}",
@@ -160,19 +187,28 @@ impl Profile {
                 "The profile folder is a link"
             )
         );
-        let save_lock = OpenOptions::new()
+        Ok(folder)
+    }
+
+    fn lock_for_save(&self, folder: &Path) -> Result<File> {
+        let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
             .open(folder.join("save.lock"))?;
-        save_lock.try_lock().context(tr!(
+        lock.try_lock().context(tr!(
             "Профиль уже сохраняется",
             "The profile is already being saved"
         ))?;
+        self.check_observed(folder)?;
+        Ok(lock)
+    }
+
+    fn check_observed(&self, folder: &Path) -> Result<()> {
         for (slot, old) in self.observed.iter().enumerate() {
             ensure!(
-                fingerprint(&slot_path(&folder, slot))? == *old,
+                fingerprint(&slot_path(folder, slot))? == *old,
                 "{}",
                 tr!(
                     "Профиль на флешке обновился в другом сеансе",
@@ -180,14 +216,24 @@ impl Profile {
                 )
             );
         }
+        Ok(())
+    }
+
+    fn next_revision(&self) -> Result<u64> {
+        self.active
+            .as_ref()
+            .map_or(Some(1), |old| old.revision.checked_add(1))
+            .context(tr!(
+                "Переполнение номера снимка",
+                "Snapshot revision overflow"
+            ))
+    }
+
+    pub fn save(&mut self) -> Result<()> {
+        let folder = self.checked_folder()?;
+        let _lock = self.lock_for_save(&folder)?;
         let (slot, revision) = match &self.active {
-            Some(old) => (
-                1 - old.slot,
-                old.revision.checked_add(1).context(tr!(
-                    "Переполнение номера снимка",
-                    "Snapshot revision overflow"
-                ))?,
-            ),
+            Some(old) => (1 - old.slot, self.next_revision()?),
             None => (0, 1),
         };
         let path = slot_path(&folder, slot as usize);
@@ -197,6 +243,7 @@ impl Profile {
             &self.secret,
             &self.id,
             revision,
+            &self.recent,
             draft.as_file_mut(),
         )?;
         draft.as_file().sync_all()?;
@@ -220,6 +267,137 @@ impl Profile {
         Ok(())
     }
 
+    pub fn change_password(
+        &mut self,
+        resolve_root: &impl Fn() -> Result<PathBuf>,
+    ) -> Result<PasswordChange> {
+        let current = read_secret(tr!(
+            "Текущий пароль [Enter — отмена]: ",
+            "Current password [Enter to cancel]: "
+        ))?;
+        if current.expose_secret().is_empty() {
+            return Ok(PasswordChange::Canceled);
+        }
+        ensure!(
+            current.expose_secret() == self.secret.expose_secret(),
+            "{}",
+            tr!(
+                "Текущий пароль неверен.",
+                "The current password is incorrect."
+            )
+        );
+        let next = read_secret(tr!(
+            "Новый пароль [Enter — отмена]: ",
+            "New password [Enter to cancel]: "
+        ))?;
+        if next.expose_secret().is_empty() {
+            return Ok(PasswordChange::Canceled);
+        }
+        ensure!(
+            next.expose_secret() != current.expose_secret(),
+            "{}",
+            tr!("Введи другой пароль.", "Choose a different password.")
+        );
+        let repeat = read_secret(tr!(
+            "Повтори новый пароль [Enter — отмена]: ",
+            "Repeat the new password [Enter to cancel]: "
+        ))?;
+        if repeat.expose_secret().is_empty() {
+            return Ok(PasswordChange::Canceled);
+        }
+        ensure!(
+            next.expose_secret() == repeat.expose_secret(),
+            "{}",
+            tr!("Пароли отличаются.", "The passwords do not match.")
+        );
+        self.set_root(&resolve_root()?)?;
+        println!(
+            "{}",
+            tr!("Перешифровываю профиль…", "Re-encrypting the profile…")
+        );
+        self.rotate_password(next)
+    }
+
+    fn rotate_password(&mut self, next: SecretString) -> Result<PasswordChange> {
+        let folder = self.checked_folder()?;
+        let _lock = self.lock_for_save(&folder)?;
+        let slot = usize::from(
+            self.active
+                .as_ref()
+                .context(tr!("Сначала сохрани профиль", "Save the profile first"))?
+                .slot,
+        );
+        let revision = self.next_revision()?;
+        let path = slot_path(&folder, slot);
+        let mut draft = tempfile::NamedTempFile::new_in(&folder).context(tr!(
+            "Не удалось создать временный снимок",
+            "Could not create the temporary snapshot"
+        ))?;
+        write_snapshot(
+            self.work.path(),
+            &next,
+            &self.id,
+            revision,
+            &self.recent,
+            draft.as_file_mut(),
+        )
+        .and_then(|()| Ok(draft.as_file().sync_all()?))
+        .context(tr!(
+            "Не удалось записать снимок с новым паролем",
+            "Could not write the snapshot with the new password"
+        ))?;
+        let digest = (|| -> Result<String> {
+            ensure!(extract(draft.path(), &next, &self.id, None)?.revision == revision);
+            fingerprint(draft.path())?.context(tr!(
+                "Временный снимок исчез",
+                "Temporary snapshot is missing"
+            ))
+        })()
+        .context(tr!(
+            "Не удалось проверить снимок с новым паролем",
+            "Could not verify the snapshot with the new password"
+        ))?;
+
+        self.checked_folder()?;
+        self.check_observed(&folder)?;
+        // Leave the known-good original in place until the single commit rename.
+        let backup_slot = 1 - slot;
+        if self.observed[backup_slot].is_some() {
+            fs::remove_file(slot_path(&folder, backup_slot)).context(tr!(
+                "Не удалось удалить старый резервный снимок",
+                "Could not remove the old backup snapshot"
+            ))?;
+            self.observed[backup_slot] = None;
+            crate::platform::sync_directory(&folder).context(tr!(
+                "Не удалось подтвердить удаление старого резервного снимка",
+                "Could not flush removal of the old backup snapshot"
+            ))?;
+        }
+        let committed = draft
+            .persist(&path)
+            .map_err(|error| error.error)
+            .context(tr!(
+                "Не удалось заменить основной снимок",
+                "Could not replace the primary snapshot"
+            ))?;
+        self.secret = next;
+        self.active = Some(Saved {
+            revision,
+            slot: slot as u8,
+        });
+        self.observed[slot] = Some(digest);
+        let verified = (|| -> Result<()> {
+            committed.sync_all()?;
+            crate::platform::sync_directory(&folder)?;
+            self.checked_folder()?;
+            self.check_observed(&folder)
+        })();
+        Ok(match verified {
+            Ok(()) => PasswordChange::Saved,
+            Err(error) => PasswordChange::VerifyOnReconnect(error),
+        })
+    }
+
     pub fn write_recovery(&self) -> Result<PathBuf> {
         let directory = crate::platform::app_dir()?.join("recovery");
         fs::create_dir_all(&directory)?;
@@ -237,6 +415,7 @@ impl Profile {
             &self.secret,
             &self.id,
             revision,
+            &self.recent,
             draft.as_file_mut(),
         )?;
         draft.as_file().sync_all()?;
@@ -375,18 +554,35 @@ fn write_snapshot(
     secret: &SecretString,
     id: &str,
     revision: u64,
+    recent: &RecentFolders,
     output: &mut File,
 ) -> Result<()> {
+    let mut snapshot = Snapshot {
+        format: 1,
+        id: id.to_owned(),
+        revision,
+        recent: recent.clone(),
+    };
+    let metadata = loop {
+        let bytes = serde_json::to_vec(&snapshot)?;
+        if bytes.len() <= MAX_METADATA {
+            break bytes;
+        }
+        ensure!(
+            !snapshot.recent.is_empty(),
+            "{}",
+            tr!(
+                "Слишком большие метаданные профиля",
+                "Profile metadata is too large"
+            )
+        );
+        snapshot.recent.forget_oldest();
+    };
     let mut recipient = scrypt::Recipient::new(secret.clone());
     recipient.set_work_factor(18);
     let encryptor = Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?;
     let encrypted = encryptor.wrap_output(BufWriter::new(output))?;
     let mut archive = tar::Builder::new(encrypted);
-    let metadata = serde_json::to_vec(&Snapshot {
-        format: 1,
-        id: id.to_owned(),
-        revision,
-    })?;
     let mut header = tar::Header::new_gnu();
     header.set_size(metadata.len() as u64);
     header.set_mode(0o600);
@@ -396,7 +592,12 @@ fn write_snapshot(
     Ok(())
 }
 
-fn extract(path: &Path, secret: &SecretString, id: &str, destination: &Path) -> Result<u64> {
+fn extract(
+    path: &Path,
+    secret: &SecretString,
+    id: &str,
+    destination: Option<&Path>,
+) -> Result<Snapshot> {
     let mut age_identity = scrypt::Identity::new(secret.clone());
     age_identity.set_max_work_factor(18);
     let decryptor = Decryptor::new_buffered(BufReader::new(File::open(path)?))?;
@@ -407,7 +608,7 @@ fn extract(path: &Path, secret: &SecretString, id: &str, destination: &Path) -> 
         .next()
         .context(tr!("Пустой снимок", "Empty snapshot"))??;
     ensure!(
-        metadata.path()? == Path::new(METADATA) && metadata.size() <= 4096,
+        metadata.path()? == Path::new(METADATA) && metadata.size() <= MAX_METADATA as u64,
         "{}",
         tr!("Неизвестный формат снимка", "Unknown snapshot format")
     );
@@ -444,18 +645,23 @@ fn extract(path: &Path, secret: &SecretString, id: &str, destination: &Path) -> 
             "{}",
             tr!("Слишком большой профиль", "The profile is too large")
         );
-        let output = destination.join(relative);
-        fs::create_dir_all(
-            output
-                .parent()
-                .context(tr!("Недопустимый путь", "Invalid path"))?,
-        )?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(output)?;
+        let copied = if let Some(destination) = destination {
+            let output = destination.join(relative);
+            fs::create_dir_all(
+                output
+                    .parent()
+                    .context(tr!("Недопустимый путь", "Invalid path"))?,
+            )?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(output)?;
+            io::copy(&mut entry, &mut file)?
+        } else {
+            io::copy(&mut entry, &mut io::sink())?
+        };
         ensure!(
-            io::copy(&mut entry, &mut file)? == entry.size(),
+            copied == entry.size(),
             "{}",
             tr!("Оборванный файл в снимке", "Truncated file in the snapshot")
         );
@@ -473,7 +679,7 @@ fn extract(path: &Path, secret: &SecretString, id: &str, destination: &Path) -> 
             )
         )
     }
-    Ok(metadata.revision)
+    Ok(metadata)
 }
 
 #[cfg(test)]
@@ -492,10 +698,19 @@ mod tests {
         fs::write(work.join("tmp/private.txt"), b"session scratch")?;
         let secret = SecretString::from("a synthetic password for the test".to_owned());
         let file = dir.path().join("snapshot.age");
-        write_snapshot(&work, &secret, "test-marker", 3, &mut File::create(&file)?)?;
+        write_snapshot(
+            &work,
+            &secret,
+            "test-marker",
+            3,
+            &RecentFolders::default(),
+            &mut File::create(&file)?,
+        )?;
         let destination = dir.path().join("output");
         fs::create_dir(&destination)?;
-        assert_eq!(extract(&file, &secret, "test-marker", &destination)?, 3);
+        let snapshot = extract(&file, &secret, "test-marker", Some(&destination))?;
+        assert_eq!(snapshot.revision, 3);
+        assert!(snapshot.recent.is_empty());
         assert_eq!(
             fs::read(destination.join("codex/auth.json"))?,
             b"synthetic-token"
@@ -505,12 +720,92 @@ mod tests {
             b"synthetic-db"
         );
         assert!(!destination.join("tmp").exists());
-        assert!(extract(&file, &secret, "other-marker", &destination).is_err());
+        assert!(extract(&file, &secret, "other-marker", None).is_err());
         let bytes = fs::read(&file)?;
         assert!(!bytes.windows(15).any(|bytes| bytes == b"synthetic-token"));
         fs::write(&file, &bytes[..bytes.len() - 17])?;
-        fs::create_dir(dir.path().join("broken"))?;
-        assert!(extract(&file, &secret, "test-marker", &dir.path().join("broken")).is_err());
+        assert!(extract(&file, &secret, "test-marker", None).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn password_rotation_preserves_profile_and_retires_both_old_slots() -> Result<()> {
+        let bundle = tempfile::tempdir()?;
+        let root = bundle.path().to_owned();
+        crate::bundle::init(&root)?;
+        let id = crate::bundle::read_marker(&root)?.id;
+        let folder = root.join("profile");
+        fs::create_dir(&folder)?;
+        let lock = File::create(folder.join("session.lock"))?;
+        lock.try_lock()?;
+        let old = SecretString::from("old test password".to_owned());
+        let new = SecretString::from("new test password".to_owned());
+        let mut profile = Profile {
+            root,
+            id: id.clone(),
+            secret: old.clone(),
+            _lock: lock,
+            active: None,
+            observed: [None, None],
+            recent: RecentFolders::default(),
+            work: tempfile::tempdir()?,
+        };
+        fs::create_dir(profile.work.path().join("codex"))?;
+        fs::create_dir_all(profile.work.path().join("oc-data/opencode"))?;
+        fs::write(
+            profile.work.path().join("codex/auth.json"),
+            b"test-codex-auth",
+        )?;
+        fs::write(
+            profile.work.path().join("oc-data/opencode/auth.json"),
+            b"test-opencode-auth",
+        )?;
+        let project = profile.root.join("project");
+        fs::create_dir(&project)?;
+        profile.recent.remember(&profile.root, &project);
+        profile.save()?;
+        profile.save()?;
+
+        let before = profile.observed.clone();
+        let too_big = profile.work.path().join("codex/too-big");
+        File::create(&too_big)?.set_len(MAX_SNAPSHOT + 1)?;
+        assert!(profile.rotate_password(new.clone()).is_err());
+        fs::remove_file(&too_big)?;
+        assert_eq!(fingerprint(&slot_path(&folder, 0))?, before[0]);
+        assert_eq!(fingerprint(&slot_path(&folder, 1))?, before[1]);
+        assert_eq!(
+            extract(&slot_path(&folder, 1), &old, &id, None)?.revision,
+            2
+        );
+
+        assert!(matches!(
+            profile.rotate_password(new.clone())?,
+            PasswordChange::Saved
+        ));
+        assert!(!slot_path(&folder, 0).exists());
+        assert!(extract(&slot_path(&folder, 1), &old, &id, None).is_err());
+        let restored = tempfile::tempdir()?;
+        let snapshot = extract(&slot_path(&folder, 1), &new, &id, Some(restored.path()))?;
+        assert_eq!(snapshot.revision, 3);
+        assert_eq!(
+            snapshot.recent.available(&profile.root),
+            [project.canonicalize()?]
+        );
+        assert_eq!(
+            fs::read(restored.path().join("codex/auth.json"))?,
+            b"test-codex-auth"
+        );
+        assert_eq!(
+            fs::read(restored.path().join("oc-data/opencode/auth.json"))?,
+            b"test-opencode-auth"
+        );
+
+        profile.save()?;
+        assert_eq!(
+            extract(&slot_path(&folder, 0), &new, &id, None)?.revision,
+            4
+        );
+        assert!(extract(&slot_path(&folder, 0), &old, &id, None).is_err());
         Ok(())
     }
 

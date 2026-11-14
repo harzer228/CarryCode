@@ -1,3 +1,4 @@
+use crate::recent::RecentFolders;
 use anyhow::{Context, Result, ensure};
 use std::{
     ffi::OsString,
@@ -7,7 +8,7 @@ use std::{
 
 const PAGE_SIZE: usize = 15;
 
-pub fn pick(start: &Path) -> Result<Option<PathBuf>> {
+pub fn pick(start: &Path, root: &Path, recent: &RecentFolders) -> Result<Option<PathBuf>> {
     let home = crate::platform::home();
     let mut current = start.to_owned();
     let mut page = 0;
@@ -67,8 +68,8 @@ pub fn pick(start: &Path) -> Result<Option<PathBuf>> {
         println!(
             "{}",
             tr!(
-                "d — диски   h — домой   p — ввести путь   n — новая папка   . — скрытые   0 — назад",
-                "d — drives   h — home   p — enter a path   n — new folder   . — hidden   0 — back"
+                "d — диски   h — домой   p — ввести путь   n — новая папка   . — скрытые\nr — недавние папки   0 — назад",
+                "d — drives   h — home   p — enter a path   n — new folder   . — hidden\nr — recent folders   0 — back"
             )
         );
         let Some(choice) = crate::prompt(tr!("Папка > ", "Folder > "))? else {
@@ -105,6 +106,7 @@ pub fn pick(start: &Path) -> Result<Option<PathBuf>> {
             ".." => current.parent().map(Path::to_owned),
             "h" => Some(home.clone()),
             "d" => choose_root()?,
+            "r" => choose_recent(&recent.available(root))?,
             "p" => {
                 let input = crate::ask(tr!("Путь [пусто — назад]: ", "Path [blank to go back]: "))?;
                 let input = input.trim_matches('"');
@@ -149,6 +151,29 @@ pub fn pick(start: &Path) -> Result<Option<PathBuf>> {
             }
         }
     }
+}
+
+fn choose_recent(paths: &[PathBuf]) -> Result<Option<PathBuf>> {
+    println!("{}", tr!("\nНедавние папки", "\nRecent folders"));
+    if paths.is_empty() {
+        println!(
+            "{}",
+            tr!(
+                "Нет доступных недавних папок.",
+                "No recent folders are available."
+            )
+        );
+        return Ok(None);
+    }
+    for (index, path) in paths.iter().enumerate() {
+        println!("  {}  {}", index + 1, display(path));
+    }
+    let choice = crate::ask(tr!("Номер [0 — назад]: ", "Number [0 to go back]: "))?;
+    Ok(choice
+        .parse::<usize>()
+        .ok()
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| paths.get(index).cloned()))
 }
 
 fn list(path: &Path, show_hidden: bool) -> io::Result<Vec<OsString>> {

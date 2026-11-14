@@ -17,6 +17,7 @@ mod folders;
 mod language;
 mod platform;
 mod profile;
+mod recent;
 
 use anyhow::{Context, Result, bail, ensure};
 use bundle::Agent;
@@ -157,8 +158,8 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
         println!(
             "{}",
             trf!(
-                "\n1  Кодить с Codex\n2  Кодить с OpenCode\n3  Разобраться с проблемой\n4  Проверить флешку и соединение\n5  Автозапуск: {startup}\n6  Язык / Language\n0  Выйти\n",
-                "\n1  Code with Codex\n2  Code with OpenCode\n3  Troubleshoot a problem\n4  Check drive and connection\n5  Autostart: {startup}\n6  Language / Язык\n0  Exit\n"
+                "\n1  Кодить с Codex\n2  Кодить с OpenCode\n3  Разобраться с проблемой\n4  Проверить флешку и соединение\n5  Автозапуск: {startup}\n6  Язык / Language\n7  Сменить пароль\n0  Выйти\n",
+                "\n1  Code with Codex\n2  Code with OpenCode\n3  Troubleshoot a problem\n4  Check drive and connection\n5  Autostart: {startup}\n6  Language / Язык\n7  Change password\n0  Exit\n"
             )
         );
         match prompt(tr!("Выбери пункт: ", "Choose an option: "))?.as_deref() {
@@ -266,6 +267,27 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                     eprintln!("flashGPT: {error:#}");
                 }
             }
+            Some("7") => match profile.change_password(&resolve_root) {
+                Ok(profile::PasswordChange::Canceled) => {}
+                Ok(profile::PasswordChange::Saved) => println!(
+                    "{}",
+                    tr!(
+                        "Пароль изменён. При следующем запуске введи новый пароль.",
+                        "Password changed. Use the new password the next time you open flashGPT."
+                    )
+                ),
+                Ok(profile::PasswordChange::VerifyOnReconnect(error)) => {
+                    eprintln!(
+                        "{}",
+                        trf!(
+                            "Пароль заменён, но не удалось подтвердить запись: {error:#}\nСеанс закрывается. Переподключи флешку и проверь вход с новым паролем.",
+                            "The password was replaced, but the write could not be verified: {error:#}\nClosing this session. Reconnect the drive and try opening the profile with the new password."
+                        )
+                    );
+                    return profile.close();
+                }
+                Err(error) => eprintln!("flashGPT: {error:#}"),
+            },
             _ => println!(
                 "{}",
                 tr!(
@@ -303,7 +325,9 @@ fn run_agent(
     agent: Agent,
     mode: agent::Mode,
 ) -> Result<()> {
-    let Some(directory) = folders::pick(workspace)? else {
+    let root = resolve_root()?;
+    profile.set_root(&root)?;
+    let Some(directory) = folders::pick(workspace, &root, &profile.recent)? else {
         return Ok(());
     };
     *workspace = directory;
@@ -319,6 +343,9 @@ fn run_agent(
         )
     );
     let result = agent::execute(&root, profile.work.path(), workspace, agent, mode, staged);
+    if result.is_ok() {
+        profile.recent.remember(&root, workspace);
+    }
     finish_profile(profile, resolve_root)?;
     let status = result?;
     ensure!(

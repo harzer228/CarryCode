@@ -2,8 +2,8 @@
   <h1><img src="media/banner.png" alt="flashGPT" width="100%"></h1>
   <p>Carry Codex CLI, OpenCode, and your encrypted profile on one USB drive.</p>
   <p>
-    <a href="https://github.com/harzer228/flashGPT/releases/download/v0.2.0-beta.2/flashGPT-setup-windows-x64.exe"><strong>Windows installer ↓</strong></a>
-    · <a href="https://github.com/harzer228/flashGPT/releases/tag/v0.2.0-beta.2">Portable ZIP</a>
+    <a href="https://github.com/harzer228/flashGPT/releases/latest/download/flashGPT-setup-windows-x64.exe"><strong>Windows installer ↓</strong></a>
+    · <a href="https://github.com/harzer228/flashGPT/releases/latest">Portable ZIP</a>
     · <a href="#quick-start">Quick start</a>
     · <a href="../README.md">Документация на русском</a>
   </p>
@@ -15,7 +15,7 @@
 
 ## Quick start
 
-1. On **Windows 11**, run the installer and select a destination such as `F:\flashGPT`. For manual installation or installation from Linux, extract the portable ZIP to the destination. Both downloads and their SHA-256 checksums are on the [beta release page](https://github.com/harzer228/flashGPT/releases/tag/v0.2.0-beta.2).
+1. On **Windows 11**, run the installer and select a destination such as `F:\flashGPT`. For manual installation or installation from Linux, extract the portable ZIP to the destination. Both downloads and their SHA-256 checksums are on the [beta release page](https://github.com/harzer228/flashGPT/releases/latest).
 2. Run `flashGPT.exe` on Windows. On **Ubuntu 24.04 LTS** or **Arch Linux**, open a terminal in the bundle folder and run `./flashgpt`. The bundle targets x86-64.
 3. Create a profile password. Pick a coding agent, select a working folder in the terminal, and sign in to your provider on first use. For English menus, choose **6 → 2**.
 
@@ -27,9 +27,10 @@ The CLI runs on the connected computer and uses the chosen cloud provider over t
 
 | Task | In flashGPT |
 | --- | --- |
-| **Start coding** | Launch either official CLI in the folder you pick. |
+| **Start coding** | Launch either official CLI in the folder you pick. Press **r** in the picker to revisit a recent folder. |
 | **Troubleshoot** | Use Diagnose for read-only investigation or Repair for edits with the CLI’s permissions. |
 | **Move between computers** | Unlock your profile to use the credentials and settings you saved. Close the menu before ejecting the drive. |
+| **Change your password** | Use menu item **7** to re-encrypt your profile with a new password. |
 | **Open on plug-in** | Use menu item **5** to enable or disable autostart on the current computer. |
 
 ## Inside the terminal
