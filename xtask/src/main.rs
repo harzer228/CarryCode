@@ -343,13 +343,7 @@ fn package(repo: &Path, dist: &Path) -> Result<()> {
         runtime.join("runtime.json"),
         false,
     ));
-    for file in [
-        "README.md",
-        "PLAN.md",
-        "LICENSE",
-        "SECURITY.md",
-        "runtimes.lock.json",
-    ] {
+    for file in ["README.md", "LICENSE", "SECURITY.md", "runtimes.lock.json"] {
         files.push((file.into(), repo.join(file), false));
     }
     collect(repo, Path::new("licenses"), &mut files)?;

@@ -59,7 +59,7 @@ cargo run --locked -p xtask -- build x86_64-unknown-linux-musl
 cargo run --locked -p xtask -- package
 ```
 
-Результат появится в `dist/`. Подготовка физической флешки и приёмка описаны в [плане](PLAN.md). Для upstream-клиентов действуют их лицензии из `licenses/`.
+Результат появится в `dist/`. Для upstream-клиентов действуют их лицензии из `licenses/`.
 
 Чтобы собрать установщик из готового ZIP, выполни в PowerShell на Windows `./installer/build.ps1 -Version 0.2.0-beta.2`. Скрипт использует переносимый компилятор Inno Setup и сохраняет EXE с отдельной контрольной суммой в `dist/`.
 
