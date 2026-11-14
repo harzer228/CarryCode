@@ -2,7 +2,8 @@
   <h1><img src="media/banner.png" alt="flashGPT" width="100%"></h1>
   <p>Carry Codex CLI, OpenCode, and your encrypted profile on one USB drive.</p>
   <p>
-    <a href="https://github.com/harzer228/flashGPT/releases/tag/v0.2.0-beta.2"><strong>Download beta ↓</strong></a>
+    <a href="https://github.com/harzer228/flashGPT/releases/download/v0.2.0-beta.2/flashGPT-setup-windows-x64.exe"><strong>Windows installer ↓</strong></a>
+    · <a href="https://github.com/harzer228/flashGPT/releases/tag/v0.2.0-beta.2">Portable ZIP</a>
     · <a href="#quick-start">Quick start</a>
     · <a href="../README.md">Документация на русском</a>
   </p>
@@ -14,8 +15,8 @@
 
 ## Quick start
 
-1. Download `flashgpt-usb-amd64.zip` and `SHA256SUMS` from the [beta release](https://github.com/harzer228/flashGPT/releases/tag/v0.2.0-beta.2). Verify the ZIP and extract it to a folder on your USB drive.
-2. Run `flashGPT.exe` on **Windows 11**. On **Ubuntu 24.04 LTS** or **Arch Linux**, open a terminal in the extracted folder and run `./flashgpt`. The bundle targets x86-64.
+1. On **Windows 11**, run the installer and select a destination such as `F:\flashGPT`. For manual installation or installation from Linux, extract the portable ZIP to the destination. Both downloads and their SHA-256 checksums are on the [beta release page](https://github.com/harzer228/flashGPT/releases/tag/v0.2.0-beta.2).
+2. Run `flashGPT.exe` on Windows. On **Ubuntu 24.04 LTS** or **Arch Linux**, open a terminal in the bundle folder and run `./flashgpt`. The bundle targets x86-64.
 3. Create a profile password. Pick a coding agent, select a working folder in the terminal, and sign in to your provider on first use. For English menus, choose **6 → 2**.
 
 The CLI runs on the connected computer and uses the chosen cloud provider over the internet.
