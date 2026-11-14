@@ -1,0 +1,16 @@
+/target/
+/dist/
+/.cargo-home/
+/profile/
+/flashgpt.json
+/flashgpt-settings.json
+*.age
+auth.json
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-*
+*.log
+.env
+.env.*

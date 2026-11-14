@@ -1,0 +1,32 @@
+{
+  "assets": [
+    {
+      "platform": "windows-amd64",
+      "agent": "codex",
+      "version": "0.167.1",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.167.1/codex-package-x86_64-pc-windows-msvc.tar.gz",
+      "sha256": "a327ba32f46e39079486ffa29e160e9da9ab2b2f73744d6101509729c26c1c1b"
+    },
+    {
+      "platform": "windows-amd64",
+      "agent": "opencode",
+      "version": "2.2.5",
+      "url": "https://github.com/anomalyco/opencode/releases/download/v2.2.5/opencode-windows-x64-baseline.zip",
+      "sha256": "3acca208ad79add59aed13d07b7e08ddf24e0adbbb7f44a9131408d7b3ca67cd"
+    },
+    {
+      "platform": "linux-amd64",
+      "agent": "codex",
+      "version": "0.167.1",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.167.1/codex-package-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "a945df3df83e849dd7b74787e27f8a459c1946b0e3afe3dc8eef8a8d1845fd4f"
+    },
+    {
+      "platform": "linux-amd64",
+      "agent": "opencode",
+      "version": "2.2.5",
+      "url": "https://github.com/anomalyco/opencode/releases/download/v2.2.5/opencode-linux-x64-baseline.tar.gz",
+      "sha256": "09f44302c10fd036912f59c81fd1aef5df45dd06f649197f9dfc9bbe2a79614e"
+    }
+  ]
+}
