@@ -2,7 +2,7 @@
 
 # flashGPT
 
-Текущая версия — **0.2.0-beta.3**. [English quick start](#quick-start).
+Текущая версия — **0.1.0-beta.4**. [English quick start](#quick-start).
 
 Одна флешка для запуска официальных Codex CLI и OpenCode CLI. Меню, шифрование профиля и помощник автооткрытия написаны на Rust. Команды выполняются на подключённом ПК, модель работает у облачного провайдера.
 
@@ -13,7 +13,7 @@
 1. Скачай `flashgpt-usb-amd64.zip` из GitHub Releases и проверь SHA-256 по `SHA256SUMS` релиза. Распакуй архив в один каталог на флешке. Для использования между Windows и Linux подходит exFAT.
 2. В Windows 11 x64 открой `flashGPT.exe`. В Ubuntu 24.04 LTS и Arch Linux x86-64 открой терминал в каталоге комплекта и выполни `./flashgpt`. При ошибке выполнения проверь права файла и параметр монтирования `noexec`. На Linux-файловой системе обычный запуск требует флага выполнения для лаунчера и исполняемых файлов в `bin/linux-amd64/`.
 3. При первом открытии создай пароль профиля. При каждом следующем открытии введи его, чтобы попасть в меню. Для существующего профиля подойдёт прежний пароль.
-4. Выбери «Кодить с Codex» или «Кодить с OpenCode». В списке папок введи номер для перехода, `..` для выхода на уровень выше или нажми Enter для выбора открытой папки. `r` показывает до пяти недавних доступных папок, `d` — диски, `p` позволяет ввести путь, `n` создаёт папку. В первый раз войди в провайдера через интерфейс Codex или `/connect` в OpenCode.
+4. Выбери «Кодить с Codex» или «Кодить с OpenCode». В проводнике используй **↑/↓** и **Enter** для навигации. Строка «Выбрать эту папку» и клавиша **F2** подтверждают рабочую папку. **←** возвращает на уровень выше, **Tab** открывает до пяти недавних папок, **/** ищет по имени, **F10** открывает действия с папками и дисками. В первый раз войди в провайдера через интерфейс Codex или `/connect` в OpenCode.
 5. После выхода из клиента дождись сохранения и закрой меню перед извлечением флешки.
 
 Пункт **6 — Язык / Language** переключает интерфейс flashGPT между русским и английским. Выбор хранится в `flashgpt-settings.json` на флешке и применяется при следующем запуске, в том числе к экрану пароля.
@@ -63,7 +63,7 @@ cargo run --locked -p xtask -- package
 
 Результат появится в `dist/`. Для upstream-клиентов действуют их лицензии из `licenses/`.
 
-Чтобы собрать установщик из готового ZIP, выполни в PowerShell на Windows `./installer/build.ps1 -Version 0.2.0-beta.3`. Скрипт использует переносимый компилятор Inno Setup и сохраняет EXE с отдельной контрольной суммой в `dist/`.
+Чтобы собрать установщик из готового ZIP, выполни в PowerShell на Windows `./installer/build.ps1 -Version 0.1.0-beta.4`. Скрипт использует переносимый компилятор Inno Setup и сохраняет EXE с отдельной контрольной суммой в `dist/`.
 
 ## Quick start
 
@@ -72,9 +72,9 @@ flashGPT is a portable Rust launcher for Codex CLI and OpenCode CLI. The bundle 
 1. Download the beta ZIP from [Releases](https://github.com/harzer228/flashGPT/releases) and check its SHA-256 against `SHA256SUMS`. Extract it to a folder on the USB drive.
 2. Open `flashGPT.exe` on Windows or run `./flashgpt` from a terminal in that folder on Linux.
 3. Set or enter the profile password. Choose **6 — Язык / Language**, then **2 — English**. The choice stays on the USB drive and applies to the password prompt on the next launch.
-4. Choose Codex or OpenCode, then select a working folder. Use a number to open a subfolder, `..` to go up, or Enter to select the current folder.
+4. Choose Codex or OpenCode, then select a working folder. Use the arrow keys to move and Enter to open the focused item. Choose **Choose this folder** or press **F2** to confirm the current folder.
 5. Sign in to your cloud provider on first use. Exit the client, wait for the profile to save, and close the menu before ejecting the drive.
 
 Use **5 — Autostart** to enable or disable the USB watcher on the current computer.
 
-Use **7 — Change password** to re-encrypt your profile. In the folder picker, press **r** to browse recent folders saved in your encrypted profile.
+Use **7 — Change password** to re-encrypt your profile. In the folder picker, press **Tab** for recent folders, **/** to search by name, and **F10** for more actions.

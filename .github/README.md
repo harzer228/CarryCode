@@ -27,7 +27,7 @@ The CLI runs on the connected computer and uses the chosen cloud provider over t
 
 | Task | In flashGPT |
 | --- | --- |
-| **Start coding** | Launch either official CLI in the folder you pick. Press **r** in the picker to revisit a recent folder. |
+| **Start coding** | Pick a folder with the arrow keys, search by name with **/**, or press **Tab** to revisit a recent folder. |
 | **Troubleshoot** | Use Diagnose for read-only investigation or Repair for edits with the CLI’s permissions. |
 | **Move between computers** | Unlock your profile to use the credentials and settings you saved. Close the menu before ejecting the drive. |
 | **Change your password** | Use menu item **7** to re-encrypt your profile with a new password. |
@@ -37,7 +37,7 @@ The CLI runs on the connected computer and uses the chosen cloud provider over t
 
 ### Folder picker
 
-<img src="media/folders.png" alt="Folder picker showing sample projects and shortcuts for opening folders and entering a path" width="760">
+<img src="media/folders.png" alt="Folder picker with a highlighted selection, recent folders, and keyboard shortcuts" width="760">
 
 ### Diagnose and repair
 

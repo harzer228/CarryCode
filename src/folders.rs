@@ -1,179 +1,39 @@
+mod picker;
+
 use crate::recent::RecentFolders;
 use anyhow::{Context, Result, ensure};
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs, io,
     path::{Component, Path, PathBuf},
 };
 
-const PAGE_SIZE: usize = 15;
-
 pub fn pick(start: &Path, root: &Path, recent: &RecentFolders) -> Result<Option<PathBuf>> {
-    let home = crate::platform::home();
-    let mut current = start.to_owned();
-    let mut page = 0;
-    let mut show_hidden = false;
-    loop {
-        let folders = match list(&current, show_hidden) {
-            Ok(folders) => folders,
-            Err(error) => {
-                eprintln!(
-                    "{}",
-                    trf!(
-                        "Не удалось открыть {}: {error}",
-                        "Could not open {}: {error}",
-                        display(&current)
-                    )
-                );
-                Vec::new()
-            }
-        };
-        let pages = folders.len().div_ceil(PAGE_SIZE).max(1);
-        page = page.min(pages - 1);
-        let first = page * PAGE_SIZE;
-        println!(
-            "{}",
-            trf!(
-                "\nПапка: {}  ({}/{pages})",
-                "\nFolder: {}  ({}/{pages})",
-                display(&current),
-                page + 1
-            )
-        );
-        for (index, folder) in folders.iter().skip(first).take(PAGE_SIZE).enumerate() {
-            println!("  {:>2}  {}/", index + 1, visible(folder));
-        }
-        if folders.is_empty() {
-            println!(
-                "{}",
-                tr!("  Нет видимых подпапок.", "  No visible subfolders.")
-            );
-        }
-        println!(
-            "{}",
-            tr!(
-                "Enter — выбрать эту папку   Номер — открыть подпапку   .. — вверх",
-                "Enter — select this folder   Number — open a subfolder   .. — up"
-            )
-        );
-        if pages > 1 {
-            println!(
-                "{}",
-                tr!(
-                    "+ / - — следующая / предыдущая страница",
-                    "+ / - — next / previous page"
-                )
-            );
-        }
-        println!(
-            "{}",
-            tr!(
-                "d — диски   h — домой   p — ввести путь   n — новая папка   . — скрытые\nr — недавние папки   0 — назад",
-                "d — drives   h — home   p — enter a path   n — new folder   . — hidden\nr — recent folders   0 — back"
-            )
-        );
-        let Some(choice) = crate::prompt(tr!("Папка > ", "Folder > "))? else {
-            return Ok(None);
-        };
-        let next = match choice.as_str() {
-            "" => {
-                if current.parent().is_some() && fs::read_dir(&current).is_ok() {
-                    return Ok(Some(current));
-                }
-                println!(
-                    "{}",
-                    tr!(
-                        "Выбери доступную рабочую папку внутри диска.",
-                        "Choose an accessible folder inside a drive."
-                    )
-                );
-                continue;
-            }
-            "0" => return Ok(None),
-            "+" => {
-                page = (page + 1).min(pages - 1);
-                continue;
-            }
-            "-" => {
-                page = page.saturating_sub(1);
-                continue;
-            }
-            "." => {
-                show_hidden = !show_hidden;
-                page = 0;
-                continue;
-            }
-            ".." => current.parent().map(Path::to_owned),
-            "h" => Some(home.clone()),
-            "d" => choose_root()?,
-            "r" => choose_recent(&recent.available(root))?,
-            "p" => {
-                let input = crate::ask(tr!("Путь [пусто — назад]: ", "Path [blank to go back]: "))?;
-                let input = input.trim_matches('"');
-                (!input.is_empty()).then(|| current.join(input))
-            }
-            "n" => {
-                let name = crate::ask(tr!(
-                    "Имя новой папки [пусто — назад]: ",
-                    "New folder name [blank to go back]: "
-                ))?;
-                if name.is_empty() {
-                    continue;
-                }
-                match create_folder(&current, &name) {
-                    Ok(path) => Some(path),
-                    Err(error) => {
-                        eprintln!(
-                            "{}",
-                            trf!(
-                                "Не удалось создать папку: {error:#}",
-                                "Could not create the folder: {error:#}"
-                            )
-                        );
-                        continue;
-                    }
-                }
-            }
-            _ => choice
-                .parse::<usize>()
-                .ok()
-                .filter(|number| (1..=PAGE_SIZE).contains(number))
-                .and_then(|number| folders.get(first + number - 1))
-                .map(|folder| current.join(folder)),
-        };
-        if let Some(next) = next {
-            match accessible(&next) {
-                Ok(path) => {
-                    current = path;
-                    page = 0;
-                }
-                Err(error) => eprintln!("{error:#}"),
-            }
-        }
+    // A minimal path prompt keeps selection usable in terminals without screen support.
+    if !cfg!(windows) && std::env::var_os("TERM").as_deref() == Some(OsStr::new("dumb")) {
+        return pick_by_path(start);
     }
+    let Ok(screen) = picker::Screen::open() else {
+        return pick_by_path(start);
+    };
+    picker::run(screen, start, root, recent)
 }
 
-fn choose_recent(paths: &[PathBuf]) -> Result<Option<PathBuf>> {
-    println!("{}", tr!("\nНедавние папки", "\nRecent folders"));
-    if paths.is_empty() {
-        println!(
-            "{}",
-            tr!(
-                "Нет доступных недавних папок.",
-                "No recent folders are available."
-            )
-        );
+fn pick_by_path(start: &Path) -> Result<Option<PathBuf>> {
+    println!("{}", display(start));
+    let Some(input) = crate::prompt(tr!(
+        "Путь к папке [Enter — текущая, 0 — назад]: ",
+        "Folder path [Enter for current, 0 to go back]: "
+    ))?
+    else {
+        return Ok(None);
+    };
+    if input == "0" {
         return Ok(None);
     }
-    for (index, path) in paths.iter().enumerate() {
-        println!("  {}  {}", index + 1, display(path));
-    }
-    let choice = crate::ask(tr!("Номер [0 — назад]: ", "Number [0 to go back]: "))?;
-    Ok(choice
-        .parse::<usize>()
-        .ok()
-        .and_then(|index| index.checked_sub(1))
-        .and_then(|index| paths.get(index).cloned()))
+    let path = accessible(&start.join(input.trim_matches('"')))?;
+    selectable(&path)?;
+    Ok(Some(path))
 }
 
 fn list(path: &Path, show_hidden: bool) -> io::Result<Vec<OsString>> {
@@ -208,6 +68,18 @@ fn accessible(path: &Path) -> Result<PathBuf> {
     Ok(result)
 }
 
+fn selectable(path: &Path) -> Result<()> {
+    ensure!(
+        path.parent().is_some(),
+        "{}",
+        tr!(
+            "Выбери папку внутри диска.",
+            "Choose a folder inside the drive."
+        )
+    );
+    Ok(())
+}
+
 fn create_folder(parent: &Path, name: &str) -> Result<PathBuf> {
     let mut parts = Path::new(name).components();
     ensure!(
@@ -222,24 +94,7 @@ fn create_folder(parent: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn choose_root() -> Result<Option<PathBuf>> {
-    #[cfg(windows)]
-    let roots = crate::platform::folder_roots();
-    #[cfg(not(windows))]
-    let roots = [PathBuf::from("/")];
-    println!("{}", tr!("\nКорневые папки", "\nRoot folders"));
-    for (index, root) in roots.iter().enumerate() {
-        println!("  {}  {}", index + 1, display(root));
-    }
-    let choice = crate::ask(tr!("Номер [0 — назад]: ", "Number [0 to go back]: "))?;
-    Ok(choice
-        .parse::<usize>()
-        .ok()
-        .and_then(|choice| choice.checked_sub(1))
-        .and_then(|index| roots.get(index).cloned()))
-}
-
-fn visible(value: &std::ffi::OsStr) -> String {
+fn visible(value: &OsStr) -> String {
     value
         .to_string_lossy()
         .chars()
