@@ -25,7 +25,7 @@ Plug in the USB drive, open CarryCode, pick Codex or OpenCode, and choose the pr
 3. **Choose an agent and project folder.** Use the arrow keys and **Enter** to open folders, then select **Choose this folder** or press **F2**. Sign in through Codex or use `/connect` in OpenCode.
 4. **Move to another computer.** Exit the CLI, wait for the profile to save, and close the menu before ejecting. Run CarryCode from the same USB bundle and unlock it with the same password.
 
-On Windows, run `Get-FileHash -Algorithm SHA256 <downloaded-file>` in PowerShell and compare the result with the checksum file from the same release. On Linux, run `sha256sum -c SHA256SUMS` in the folder containing the ZIP and `SHA256SUMS`. The Windows installer is unsigned.
+On Windows, open PowerShell in the download folder and run `Get-FileHash -Algorithm SHA256 .\flashGPT-setup-windows-x64.exe`. Compare the result with `flashGPT-setup-windows-x64.exe.sha256` from the same release. On Linux, run `sha256sum -c SHA256SUMS` in the folder containing the ZIP and `SHA256SUMS`. The Windows installer is unsigned.
 
 ## Supported systems
 
