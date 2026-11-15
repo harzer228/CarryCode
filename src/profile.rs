@@ -85,7 +85,7 @@ impl Profile {
                 "{}",
                 tr!(
                     "Создай пароль для профиля на флешке. Запомни его: он понадобится при каждом запуске.",
-                    "Create a password for your USB profile. Remember it: you’ll need it every time you open flashGPT."
+                    "Create a password for your USB profile. Remember it: you’ll need it every time you open CarryCode."
                 )
             );
         }

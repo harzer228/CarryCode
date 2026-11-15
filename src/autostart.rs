@@ -118,8 +118,8 @@ fn configure(action: &str, root: &Path, from_menu: bool) -> Result<()> {
             println!(
                 "{}",
                 tr!(
-                    "Автооткрытие flashGPT включено для этой флешки.",
-                    "flashGPT autostart is enabled for this USB drive."
+                    "Автооткрытие CarryCode включено для этой флешки.",
+                    "CarryCode autostart is enabled for this USB drive."
                 )
             );
         }
@@ -128,16 +128,16 @@ fn configure(action: &str, root: &Path, from_menu: bool) -> Result<()> {
                 println!(
                     "{}",
                     tr!(
-                        "Автооткрытие flashGPT настроено.",
-                        "flashGPT autostart is configured."
+                        "Автооткрытие CarryCode настроено.",
+                        "CarryCode autostart is configured."
                     )
                 );
             } else {
                 println!(
                     "{}",
                     tr!(
-                        "Автооткрытие flashGPT выключено.",
-                        "flashGPT autostart is off."
+                        "Автооткрытие CarryCode выключено.",
+                        "CarryCode autostart is off."
                     )
                 );
             }
@@ -152,8 +152,8 @@ fn configure(action: &str, root: &Path, from_menu: bool) -> Result<()> {
             println!(
                 "{}",
                 tr!(
-                    "Автозапуск flashGPT выключен.",
-                    "flashGPT autostart is off."
+                    "Автозапуск CarryCode выключен.",
+                    "CarryCode autostart is off."
                 )
             );
         }
@@ -252,7 +252,7 @@ pub fn watch(skip_current: bool) -> Result<()> {
             })();
             match result {
                 Ok(()) => attachment.opened = true,
-                Err(error) => eprintln!("flashGPT: {error:#}"),
+                Err(error) => eprintln!("CarryCode: {error:#}"),
             }
         }
         previous_config = Some(config);
@@ -308,13 +308,13 @@ pub fn open_attached() -> Result<()> {
     os::attached_console();
     let path = directory()?.join("registration.json");
     let config: Registration = serde_json::from_slice(&fs::read(path).context(tr!(
-        "Автооткрытие выключено. Запусти flashGPT с флешки.",
-        "Autostart is off. Start flashGPT from the USB drive."
+        "Автооткрытие выключено. Запусти CarryCode с флешки.",
+        "Autostart is off. Start CarryCode from the USB drive."
     ))?)?;
     let resolve = || {
         locate(&os::volumes()?.0, &config).context(tr!(
-            "Флешка flashGPT недоступна. Подключи её и повтори действие.",
-            "The flashGPT USB drive is unavailable. Reconnect it and try again."
+            "Флешка CarryCode недоступна. Подключи её и повтори действие.",
+            "The CarryCode USB drive is unavailable. Reconnect it and try again."
         ))
     };
     crate::language::load(&resolve()?);
@@ -457,7 +457,7 @@ mod os {
         fs::write(
             entry,
             format!(
-                "[Desktop Entry]\nType=Application\nName=flashGPT\nExec=\"{escaped}\" watch\nTerminal=false\n"
+                "[Desktop Entry]\nType=Application\nName=CarryCode\nExec=\"{escaped}\" watch\nTerminal=false\n"
             ),
         )?;
         Ok(())

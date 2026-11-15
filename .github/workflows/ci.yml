@@ -1,4 +1,4 @@
-name: Build and verify flashGPT
+name: Build and verify CarryCode
 
 on:
   push:
@@ -54,7 +54,7 @@ jobs:
               opencode=dist/runtime/bin/linux-amd64/opencode/opencode
               ;;
           esac
-          "$launcher" --version
+          [[ "$("$launcher" --version)" == "CarryCode "* ]]
           "$codex" --version
           "$opencode" --version
       - name: Preserve Linux executable modes

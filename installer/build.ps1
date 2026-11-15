@@ -45,7 +45,7 @@ try {
     [IO.Compression.ZipFile]::ExtractToDirectory($zip, $stage)
     $launcher = Join-Path $stage 'flashGPT.exe'
     $info = & $launcher --version
-    if ($LASTEXITCODE -ne 0 -or $info.Trim() -ne "flashGPT $Version") {
+    if ($LASTEXITCODE -ne 0 -or $info.Trim() -ne "CarryCode $Version") {
         throw "The bundled Windows launcher does not match version $Version."
     }
     foreach ($path in 'profile', 'flashgpt.json', 'flashgpt-settings.json') {

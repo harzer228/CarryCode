@@ -10,8 +10,17 @@ use std::{
 #[derive(Clone, Copy)]
 pub enum Mode {
     Diagnose,
+    PlanRepair,
     Edit,
 }
+
+impl Mode {
+    fn read_only(self) -> bool {
+        matches!(self, Self::Diagnose | Self::PlanRepair)
+    }
+}
+
+const REPAIR_PROMPT: &str = r#"Ask me what is broken if I have not explained it. Investigate with read-only tools. Explain your observations and uncertainty. If there is a useful change to one existing project text file, give me one JSON code block with string fields "path" (relative to the selected folder), "reason" (why the change may help), "before" (an exact unique excerpt), and "after" (its replacement). Keep the excerpts small. Do not apply changes or request administrator privileges. Reply in the language I use."#;
 
 pub fn execute(
     root: &Path,
@@ -21,6 +30,7 @@ pub fn execute(
     mode: Mode,
     staged: bool,
 ) -> Result<ExitStatus> {
+    crate::platform::require_standard_user()?;
     let stage = staged.then(crate::platform::private_dir).transpose()?;
     let program =
         bundle::runtime(agent)?.prepare(root, stage.as_ref().map(tempfile::TempDir::path))?;
@@ -32,7 +42,7 @@ pub fn execute(
             #[cfg(windows)]
             crate::platform::configure_terminal(&mut cmd);
             let (sandbox, approval) = match mode {
-                Mode::Diagnose => ("read-only", "never"),
+                Mode::Diagnose | Mode::PlanRepair => ("read-only", "never"),
                 Mode::Edit => ("workspace-write", "on-request"),
             };
             cmd.args(["--no-daemon", "-s", sandbox, "-a", approval]);
@@ -44,12 +54,18 @@ pub fn execute(
                 "--disable",
                 "hooks",
             ]);
+            if matches!(mode, Mode::PlanRepair) {
+                cmd.args(["--no-alt-screen", "--", REPAIR_PROMPT]);
+            }
         }
         Agent::OpenCode => {
             configure_opencode(work, mode)?;
             cmd.arg("--standalone").arg(directory);
             // Private mode keeps project configuration from overriding the launcher's settings.
             cmd.env("OPENCODE_DISABLE_PROJECT_CONFIG", "true");
+            if matches!(mode, Mode::PlanRepair) {
+                cmd.args(["--prompt", REPAIR_PROMPT]);
+            }
         }
     }
     crate::platform::run_child(cmd).with_context(|| {
@@ -146,7 +162,7 @@ fn configure_opencode(work: &Path, mode: Mode) -> Result<()> {
         json!({ "action": "mcp.use", "resource": "*", "effect": "deny" }),
         json!({ "action": "skill.use", "resource": "*", "effect": "deny" }),
     ];
-    if matches!(mode, Mode::Diagnose) {
+    if mode.read_only() {
         for rule in ["edit:*", "shell:*", "external_directory:*", "subagent:*"] {
             policies.push(json!({ "action": "tool.use", "resource": rule, "effect": "deny" }));
         }
@@ -156,50 +172,8 @@ fn configure_opencode(work: &Path, mode: Mode) -> Result<()> {
     Ok(())
 }
 
-pub fn diagnose(root: &Path) -> Result<()> {
-    crate::bundle::read_marker(root)?;
-    println!("{}", trf!("Носитель: {}", "Drive: {}", root.display()));
-    println!(
-        "{}",
-        trf!(
-            "Свободно на носителе: {} МиБ",
-            "Free space on the drive: {} MiB",
-            crate::platform::available(root)? / (1024 * 1024)
-        )
-    );
-    tempfile::NamedTempFile::new_in(root).context(tr!(
-        "Каталог комплекта доступен только для чтения",
-        "The bundle folder is read-only"
-    ))?;
-    let work = crate::platform::private_dir()?;
-    println!("{}", tr!("Временный каталог: OK", "Temporary folder: OK"));
-    let mut healthy = true;
-    for agent in [Agent::Codex, Agent::OpenCode] {
-        let result = diagnose_agent(root, work.path(), agent);
-        match result {
-            Ok(version) => println!("{} {version}: OK", agent.name()),
-            Err(error) => {
-                healthy = false;
-                println!("{}: {error:#}", agent.name());
-            }
-        }
-    }
-    ensure!(
-        healthy,
-        "{}",
-        tr!(
-            "Одна или несколько проверок завершились ошибкой",
-            "One or more checks failed"
-        )
-    );
-    Ok(())
-}
-
-fn diagnose_agent(root: &Path, work: &Path, agent: Agent) -> Result<String> {
-    let runtime = bundle::runtime(agent)?;
-    let program = runtime.prepare(root, None)?;
-    crate::platform::check_execution(&program)?;
-    let output = command(&program, work, work, agent)?
+pub fn probe_version(program: &Path, work: &Path, agent: Agent, expected: &str) -> Result<String> {
+    let output = command(program, work, work, agent)?
         .arg("--version")
         .output()?;
     ensure!(
@@ -212,7 +186,9 @@ fn diagnose_agent(root: &Path, work: &Path, agent: Agent) -> Result<String> {
     );
     let actual = String::from_utf8_lossy(&output.stdout);
     ensure!(
-        actual.contains(&runtime.version),
+        actual
+            .split_whitespace()
+            .any(|part| part.trim_start_matches('v') == expected),
         "{}",
         trf!(
             "Неожиданная версия CLI: {}",
@@ -220,30 +196,54 @@ fn diagnose_agent(root: &Path, work: &Path, agent: Agent) -> Result<String> {
             actual.trim()
         )
     );
-    if agent == Agent::Codex {
-        let mut probe = command(&program, work, work, agent)?;
-        probe.args([
-            "sandbox",
-            "--include-managed-config",
-            "--permission-profile",
-            ":read-only",
-            "--",
-        ]);
-        if cfg!(windows) {
-            probe.args(["cmd.exe", "/d", "/c", "exit", "0"]);
-        } else {
-            probe.arg("/bin/true");
-        }
-        let output = probe.output()?;
-        ensure!(
-            output.status.success(),
-            "{}",
-            trf!(
-                "Песочница: {}",
-                "Sandbox: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-        );
+    Ok(expected.to_owned())
+}
+
+pub fn probe_codex_sandbox(program: &Path, work: &Path) -> Result<()> {
+    let mut probe = command(program, work, work, Agent::Codex)?;
+    probe.args([
+        "sandbox",
+        "--include-managed-config",
+        "--permission-profile",
+        ":read-only",
+        "--",
+    ]);
+    if cfg!(windows) {
+        probe.args(["cmd.exe", "/d", "/c", "exit", "0"]);
+    } else {
+        probe.arg("/bin/true");
     }
-    Ok(runtime.version)
+    let output = probe.output()?;
+    ensure!(
+        output.status.success(),
+        "{}",
+        trf!(
+            "Песочница: {}",
+            "Sandbox: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repair_planning_denies_mutating_opencode_tools() -> Result<()> {
+        let work = tempfile::tempdir()?;
+        configure_opencode(work.path(), Mode::PlanRepair)?;
+        let config: Value = serde_json::from_slice(&fs::read(
+            work.path().join("oc-config/opencode/opencode.json"),
+        )?)?;
+        let policies = config["policies"].as_array().unwrap();
+        for resource in ["edit:*", "shell:*", "external_directory:*", "subagent:*"] {
+            assert!(
+                policies
+                    .contains(&json!({"action":"tool.use", "resource":resource, "effect":"deny"}))
+            );
+        }
+        Ok(())
+    }
 }

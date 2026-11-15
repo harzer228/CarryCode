@@ -452,7 +452,7 @@ impl Picker<'_> {
             Row::Location(path) => display(path),
             Row::Action(action) => match action {
                 Action::Home => tr!("Домашняя папка", "Home folder"),
-                Action::Bundle => tr!("Папка flashGPT", "flashGPT folder"),
+                Action::Bundle => tr!("Папка CarryCode", "CarryCode folder"),
                 Action::Drives => tr!("Диски", "Drives"),
                 Action::Path => tr!("Ввести путь…", "Go to a path…"),
                 Action::Create => tr!("Создать папку…", "New folder…"),

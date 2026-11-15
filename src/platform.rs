@@ -9,6 +9,18 @@ pub use linux::*;
 #[cfg(windows)]
 pub use windows::*;
 
+pub fn require_standard_user() -> Result<()> {
+    anyhow::ensure!(
+        !is_elevated()?,
+        "{}",
+        tr!(
+            "Открой CarryCode из обычного терминала без прав администратора или root.",
+            "Open CarryCode in a regular terminal without administrator or root privileges."
+        )
+    );
+    Ok(())
+}
+
 pub fn private_dir() -> Result<tempfile::TempDir> {
     let base = runtime_dir().unwrap_or(app_dir()?.join("sessions"));
     std::fs::create_dir_all(&base)?;
@@ -31,6 +43,10 @@ mod linux {
             fs::{MetadataExt, PermissionsExt},
         },
     };
+
+    pub fn is_elevated() -> Result<bool> {
+        Ok(unsafe { libc::getuid() == 0 || libc::geteuid() == 0 })
+    }
 
     pub fn app_dir() -> Result<PathBuf> {
         let base = env::var_os("XDG_DATA_HOME")
@@ -132,19 +148,47 @@ mod windows {
     use anyhow::{Context, ensure};
     use std::{ffi::OsStr, io::IsTerminal, os::windows::ffi::OsStrExt, process::Command, ptr};
     use windows_sys::Win32::{
-        Foundation::LocalFree,
+        Foundation::{CloseHandle, LocalFree},
         Security::{
             Authorization::{
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
             },
-            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
+            DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
+            SetFileSecurityW, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
         },
         Storage::FileSystem::{GetDiskFreeSpaceExW, GetLogicalDrives},
-        System::Console::{
-            CTRL_C_EVENT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle,
-            STD_OUTPUT_HANDLE, SetConsoleCtrlHandler, SetConsoleMode,
+        System::{
+            Console::{
+                CTRL_C_EVENT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle,
+                STD_OUTPUT_HANDLE, SetConsoleCtrlHandler, SetConsoleMode,
+            },
+            Threading::{GetCurrentProcess, OpenProcessToken},
         },
     };
+
+    pub fn is_elevated() -> Result<bool> {
+        let mut token = ptr::null_mut();
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut written = 0;
+        unsafe {
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let result = GetTokenInformation(
+                token,
+                TokenElevation,
+                (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+                size_of::<TOKEN_ELEVATION>() as u32,
+                &mut written,
+            );
+            let error = std::io::Error::last_os_error();
+            CloseHandle(token);
+            if result == 0 {
+                return Err(error.into());
+            }
+        }
+        Ok(elevation.TokenIsElevated != 0)
+    }
 
     pub fn wide(value: &OsStr) -> Vec<u16> {
         value.encode_wide().chain(Some(0)).collect()

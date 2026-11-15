@@ -7,9 +7,9 @@
 
 [Setup]
 AppId=flashGPT.Portable
-AppName=flashGPT
+AppName=CarryCode
 AppVersion={#AppVersion}
-AppPublisher=flashGPT contributors
+AppPublisher=CarryCode contributors
 AppPublisherURL=https://github.com/harzer228/flashGPT
 DefaultDirName={localappdata}\Programs\flashGPT
 DisableDirPage=no
@@ -33,12 +33,12 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Messages]
 english.SelectDirDesc=Choose a folder on this computer or on your USB drive.
-english.SelectDirLabel3=To prepare a USB drive, select a folder such as F:\flashGPT. To update an existing copy, first close flashGPT and its CLI, then select its current folder.
+english.SelectDirLabel3=For a new USB setup, choose a folder such as F:\CarryCode. To update flashGPT or CarryCode, close the launcher and its CLI, then select your existing folder.
 russian.SelectDirDesc=Выбери папку на компьютере или на флешке.
-russian.SelectDirLabel3=Для установки на флешку выбери папку, например F:\flashGPT. Для обновления сначала закрой flashGPT и запущенный CLI, затем укажи папку с текущей версией.
+russian.SelectDirLabel3=Для новой установки на флешку выбери папку, например F:\CarryCode. Для обновления flashGPT или CarryCode закрой лаунчер и CLI, затем выбери существующую папку.
 
 [Files]
 Source: "{#BundleDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
 [Run]
-Filename: "{app}\flashGPT.exe"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,flashGPT}"; Flags: postinstall nowait skipifsilent unchecked
+Filename: "{app}\flashGPT.exe"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,CarryCode}"; Flags: postinstall nowait skipifsilent unchecked

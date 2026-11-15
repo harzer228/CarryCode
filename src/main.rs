@@ -13,11 +13,13 @@ macro_rules! trf {
 mod agent;
 mod autostart;
 mod bundle;
+mod diagnostics;
 mod folders;
 mod language;
 mod platform;
 mod profile;
 mod recent;
+mod repair;
 
 use anyhow::{Context, Result, bail, ensure};
 use bundle::Agent;
@@ -26,14 +28,13 @@ use std::{
     ffi::OsStr,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("flashGPT: {error:#}");
+            eprintln!("CarryCode: {error:#}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -54,12 +55,11 @@ fn run() -> Result<()> {
         Some("doctor") if args.len() == 1 => {
             let root = bundle_root()?;
             language::load(&root);
-            marker(&root)?;
-            agent::diagnose(&root)
+            diagnostics::bundle(&root)
         }
         Some("doctor") if args.len() == 3 && args[1] == "--connect" => {
             language::load(&bundle_root()?);
-            connect(&args[2])
+            diagnostics::connect(&args[2])
         }
         Some("autostart") if args.len() == 2 => {
             let root = bundle_root()?;
@@ -71,13 +71,13 @@ fn run() -> Result<()> {
             autostart::run(&action, &root)
         }
         Some("--version" | "-V") if args.len() == 1 => {
-            println!("flashGPT {}", env!("CARGO_PKG_VERSION"));
+            println!("CarryCode {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Some("--help" | "-h") if args.len() == 1 => {
             language::load(&bundle_root()?);
             println!(
-                "flashGPT {}\n\n{}",
+                "CarryCode {}\nFix problems. Code anywhere.\n\n{}",
                 env!("CARGO_PKG_VERSION"),
                 tr!(
                     "flashgpt                        Открыть меню\nflashgpt doctor                 Проверить установку и песочницу\nflashgpt doctor --connect URL   Проверить DNS и HTTPS\nflashgpt autostart install|status|uninstall\n",
@@ -103,8 +103,8 @@ fn bundle_root() -> Result<std::path::PathBuf> {
     Ok(env::current_exe()?
         .parent()
         .context(tr!(
-            "Не удалось определить каталог flashGPT",
-            "Could not locate the flashGPT directory"
+            "Не удалось определить каталог CarryCode",
+            "Could not locate the CarryCode directory"
         ))?
         .to_owned())
 }
@@ -114,18 +114,21 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "{}",
         tr!(
-            "Открой flashGPT в интерактивном терминале",
-            "Open flashGPT in an interactive terminal"
+            "Открой CarryCode в интерактивном терминале",
+            "Open CarryCode in an interactive terminal"
         )
     );
-    println!("\nflashGPT {}\n", env!("CARGO_PKG_VERSION"));
+    println!(
+        "\nCarryCode {}\nFix problems. Code anywhere.\n",
+        env!("CARGO_PKG_VERSION")
+    );
     let mut profile = loop {
         let root = resolve_root()?;
         marker(&root)?;
         match profile::Profile::open(&root) {
             Ok(profile) => break profile,
             Err(error) => {
-                eprintln!("flashGPT: {error:#}");
+                eprintln!("CarryCode: {error:#}");
                 if !prompt(tr!(
                     "Enter — попробовать снова, 0 — выйти: ",
                     "Enter to retry, 0 to exit: "
@@ -137,6 +140,7 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
             }
         }
     };
+    let mut workspace = platform::home();
     if profile.is_new() {
         // Commit the password before the first agent launch or menu exit.
         profile.save().context(tr!(
@@ -147,8 +151,19 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
             "{}",
             tr!("Пароль профиля сохранён.", "Profile password saved.")
         );
+        if let Some(agent) = onboard()?
+            && let Err(error) = run_agent(
+                &resolve_root,
+                staged,
+                &mut profile,
+                &mut workspace,
+                agent,
+                agent::Mode::Edit,
+            )
+        {
+            eprintln!("CarryCode: {error:#}");
+        }
     }
-    let mut workspace = platform::home();
     loop {
         let startup = match autostart::enabled() {
             Ok(true) => tr!("вкл. — выключить", "on — turn off"),
@@ -189,15 +204,15 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                     agent::Mode::Edit,
                 );
                 if let Err(error) = result {
-                    eprintln!("flashGPT: {error:#}");
+                    eprintln!("CarryCode: {error:#}");
                 }
             }
             Some("3") => {
                 println!(
                     "{}",
                     tr!(
-                        "Диагностика — агент читает файлы и объясняет причину.\nИсправление — агент может менять файлы и запускать команды с разрешениями выбранного CLI.",
-                        "Diagnose — the agent reads files and explains the problem.\nRepair — the agent can edit files and run commands with the selected CLI's permissions."
+                        "Диагностика — агент читает файлы и объясняет, что удалось выяснить.\nИсправление — агент предлагает правку, а ты проверяешь и подтверждаешь её.",
+                        "Diagnose — the agent reads files and explains what it found.\nRepair — the agent proposes an edit for you to review and approve."
                     )
                 );
                 let mode = match ask(tr!(
@@ -207,18 +222,15 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                 .as_str()
                 {
                     "1" => agent::Mode::Diagnose,
-                    "2" => agent::Mode::Edit,
+                    "2" => agent::Mode::PlanRepair,
                     _ => continue,
                 };
-                let agent = match ask(tr!(
+                let Some(agent) = choose_agent(tr!(
                     "1 — Codex, 2 — OpenCode, 0 — назад: ",
                     "1 — Codex, 2 — OpenCode, 0 — Back: "
                 ))?
-                .as_str()
-                {
-                    "1" => Agent::Codex,
-                    "2" => Agent::OpenCode,
-                    _ => continue,
+                else {
+                    continue;
                 };
                 if let Err(error) = run_agent(
                     &resolve_root,
@@ -228,7 +240,7 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                     agent,
                     mode,
                 ) {
-                    eprintln!("flashGPT: {error:#}");
+                    eprintln!("CarryCode: {error:#}");
                 }
             }
             Some("4") => {
@@ -238,13 +250,13 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                 ))?
                 .as_str()
                 {
-                    "1" => resolve_root().and_then(|root| agent::diagnose(&root)),
+                    "1" => resolve_root().and_then(|root| diagnostics::bundle(&root)),
                     "2" => {
                         let url = ask(tr!(
                             "HTTPS URL провайдера [https://api.openai.com/]: ",
                             "Provider HTTPS URL [https://api.openai.com/]: "
                         ))?;
-                        connect(OsStr::new(if url.is_empty() {
+                        diagnostics::connect(OsStr::new(if url.is_empty() {
                             "https://api.openai.com/"
                         } else {
                             &url
@@ -253,18 +265,18 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                     _ => continue,
                 };
                 if let Err(error) = result {
-                    eprintln!("flashGPT: {error:#}");
+                    eprintln!("CarryCode: {error:#}");
                 }
             }
             Some("5") => {
                 let result = autostart::toggle(&resolve_root);
                 if let Err(error) = result {
-                    eprintln!("flashGPT: {error:#}");
+                    eprintln!("CarryCode: {error:#}");
                 }
             }
             Some("6") => {
                 if let Err(error) = choose_language(&resolve_root) {
-                    eprintln!("flashGPT: {error:#}");
+                    eprintln!("CarryCode: {error:#}");
                 }
             }
             Some("7") => match profile.change_password(&resolve_root) {
@@ -273,7 +285,7 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                     "{}",
                     tr!(
                         "Пароль изменён. При следующем запуске введи новый пароль.",
-                        "Password changed. Use the new password the next time you open flashGPT."
+                        "Password changed. Use the new password the next time you open CarryCode."
                     )
                 ),
                 Ok(profile::PasswordChange::VerifyOnReconnect(error)) => {
@@ -286,7 +298,7 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                     );
                     return profile.close();
                 }
-                Err(error) => eprintln!("flashGPT: {error:#}"),
+                Err(error) => eprintln!("CarryCode: {error:#}"),
             },
             _ => println!(
                 "{}",
@@ -297,6 +309,28 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
             ),
         }
     }
+}
+
+fn onboard() -> Result<Option<Agent>> {
+    println!(
+        "{}",
+        tr!(
+            "\nПереноси CarryCode между ПК вместе с комплектом на флешке и открывай профиль тем же паролем.\nДля работы с моделью нужен интернет и вход в выбранном CLI. При первом запуске Codex предложит войти, в OpenCode используй /connect.\nВыбери агента, затем папку проекта. В проводнике используй стрелки и Enter.",
+            "\nTake the CarryCode bundle with you on USB and unlock it with the same profile password on another computer.\nAI sessions need internet access and a provider sign-in. Codex prompts you to sign in. In OpenCode, use /connect.\nChoose an agent, then pick the project folder using the arrow keys and Enter."
+        )
+    );
+    choose_agent(tr!(
+        "1 — Codex, 2 — OpenCode, Enter — главное меню: ",
+        "1 — Codex, 2 — OpenCode, Enter — main menu: "
+    ))
+}
+
+fn choose_agent(message: &str) -> Result<Option<Agent>> {
+    Ok(match prompt(message)?.as_deref() {
+        Some("1") => Some(Agent::Codex),
+        Some("2") => Some(Agent::OpenCode),
+        _ => None,
+    })
 }
 
 fn choose_language(resolve_root: &impl Fn() -> Result<PathBuf>) -> Result<()> {
@@ -325,6 +359,7 @@ fn run_agent(
     agent: Agent,
     mode: agent::Mode,
 ) -> Result<()> {
+    platform::require_standard_user()?;
     let root = resolve_root()?;
     profile.set_root(&root)?;
     let Some(directory) = folders::pick(workspace, &root, &profile.recent)? else {
@@ -342,6 +377,15 @@ fn run_agent(
             folders::display(workspace)
         )
     );
+    if matches!(mode, agent::Mode::PlanRepair) {
+        println!(
+            "{}",
+            tr!(
+                "Опиши проблему агенту. Если он предложит правку, скопируй блок JSON до выхода из CLI.",
+                "Describe the issue to the agent. If it proposes a change, copy the JSON block before exiting the CLI."
+            )
+        );
+    }
     let result = agent::execute(&root, profile.work.path(), workspace, agent, mode, staged);
     if result.is_ok() {
         profile.recent.remember(&root, workspace);
@@ -357,13 +401,31 @@ fn run_agent(
             agent.name()
         )
     );
+    if matches!(mode, agent::Mode::PlanRepair) {
+        repair::review(workspace)?;
+    }
     Ok(())
 }
 
 fn marker(root: &Path) -> Result<()> {
     match bundle::read_marker(root) {
         Ok(_) => Ok(()),
-        Err(_) if !root.join("flashgpt.json").exists() => bundle::init(root),
+        Err(_) if !root.join("flashgpt.json").exists() => {
+            for name in ["profile/snapshot-0.age", "profile/snapshot-1.age"] {
+                match std::fs::symlink_metadata(root.join(name)) {
+                    Ok(_) => bail!(
+                        "{}",
+                        tr!(
+                            "Найден существующий профиль без ID комплекта. Восстанови его исходный flashgpt.json.",
+                            "An existing profile is missing its bundle ID. Restore its original flashgpt.json."
+                        )
+                    ),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            bundle::init(root)
+        }
         Err(error) => Err(error),
     }
 }
@@ -407,41 +469,6 @@ fn finish_profile(
     }
 }
 
-fn connect(value: &OsStr) -> Result<()> {
-    let value = value
-        .to_str()
-        .context(tr!("URL должен быть в UTF-8", "The URL must use UTF-8"))?;
-    ensure!(
-        value.starts_with("https://") && !value.contains('@'),
-        "{}",
-        tr!(
-            "Укажи HTTPS URL без данных входа",
-            "Enter an HTTPS URL without credentials"
-        )
-    );
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(8))
-        .redirects(0)
-        .try_proxy_from_env(true)
-        .build();
-    let status = match agent.head(value).call() {
-        Ok(response) => response.status(),
-        Err(ureq::Error::Status(code, _)) => code,
-        Err(error) => bail!(
-            "{}",
-            trf!("HTTPS недоступен: {error}", "HTTPS unavailable: {error}")
-        ),
-    };
-    println!(
-        "{}",
-        trf!(
-            "HTTPS доступен. Сервер ответил HTTP {status}.",
-            "HTTPS is reachable. The server returned HTTP {status}."
-        )
-    );
-    Ok(())
-}
-
 fn prompt(message: &str) -> Result<Option<String>> {
     print!("{message}");
     io::stdout().flush()?;
@@ -454,4 +481,25 @@ fn prompt(message: &str) -> Result<Option<String>> {
 
 pub fn ask(message: &str) -> Result<String> {
     prompt(message)?.context(tr!("Ввод закрыт", "Input closed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_profile_without_marker_keeps_its_identity() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let snapshot = root.path().join("profile/snapshot-0.age");
+        std::fs::create_dir(snapshot.parent().unwrap())?;
+        std::fs::write(&snapshot, b"existing snapshot")?;
+        assert!(marker(root.path()).is_err());
+        assert!(!root.path().join("flashgpt.json").exists());
+        assert_eq!(std::fs::read(snapshot)?, b"existing snapshot");
+        bundle::init(root.path())?;
+        let id = bundle::read_marker(root.path())?;
+        marker(root.path())?;
+        assert_eq!(bundle::read_marker(root.path())?, id);
+        Ok(())
+    }
 }

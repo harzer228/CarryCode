@@ -1,6 +1,6 @@
 [package]
 name = "flashgpt"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -25,6 +25,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+xattr = "1"
 zbus = "5"
 
 [target.'cfg(windows)'.build-dependencies]
