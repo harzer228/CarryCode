@@ -1,51 +1,50 @@
 <div align="center">
-  <h1><img src="media/banner.png" alt="CarryCode — Fix problems. Code anywhere." width="100%"></h1>
-  <p>Take CarryCode, Codex CLI, OpenCode, and your encrypted profile with you on USB.</p>
+  <h1><img src="media/banner.png" alt="CarryCode. Fix problems. Code anywhere." width="100%"></h1>
   <p>
-    <a href="https://github.com/harzer228/flashGPT/releases/latest/download/flashGPT-setup-windows-x64.exe"><strong>Windows installer ↓</strong></a>
-    · <a href="https://github.com/harzer228/flashGPT/releases/latest">Portable ZIP</a>
-    · <a href="#quick-start">Quick start</a>
-    · <a href="../README.md">Документация на русском</a>
-  </p>
-  <p>
-    <a href="https://github.com/harzer228/flashGPT/actions/workflows/ci.yml"><img src="https://github.com/harzer228/flashGPT/actions/workflows/ci.yml/badge.svg?branch=main&event=push" alt="Build and verify CarryCode"></a>
-    · <a href="../LICENSE">MIT license</a>
+    <a href="https://github.com/harzer228/flashGPT/releases/latest/download/flashGPT-setup-windows-x64.exe"><strong>Windows installer</strong></a>
+    · <a href="https://github.com/harzer228/flashGPT/releases/latest/download/flashgpt-usb-amd64.zip"><strong>Portable ZIP</strong></a>
+    · <a href="https://github.com/harzer228/flashGPT/releases/latest">Release notes and SHA-256</a>
+    · <a href="../README.md">На русском</a>
   </p>
 </div>
 
+**CarryCode is for developers who switch between computers and want their AI coding setup available on each one.** Take the launcher, Codex CLI, OpenCode, and your encrypted profile on one USB drive. Open a local project to resume coding or investigate a problem.
+
+**Fix problems. Code anywhere.** The USB drive carries the tools and profile. Models run on your provider's servers. AI features require internet access and a provider sign-in.
+
+## Demo
+
+Plug in the USB drive, open CarryCode, pick Codex or OpenCode, and choose the project folder. The demo uses a test profile and stops before provider sign-in.
+
+<p align="center"><img src="media/quick-start.gif" alt="Quick start demo. Plug in USB, open the CarryCode launcher, pick Codex, and select a project folder." width="760"></p>
+
 ## Quick start
 
-1. On **Windows 11**, run the installer and select a destination such as `F:\CarryCode`. For manual installation or installation from Linux, extract the portable ZIP. To update from flashGPT, close both clients and choose your existing bundle folder. [Downloads and SHA-256 checksums](https://github.com/harzer228/flashGPT/releases/latest)
-2. Run `flashGPT.exe` on Windows. On **Ubuntu 24.04 LTS** or **Arch Linux**, open a terminal in the bundle folder and run `./flashgpt`. The bundle targets x86-64.
-3. Create and remember your profile password, or unlock your existing flashGPT profile. Pick a coding agent and project folder. Sign in from Codex or use `/connect` in OpenCode. For English menus, choose **6 → 2**.
+1. **Prepare the drive.** Download the Windows installer or portable ZIP and check SHA-256 before running or extracting it. Point the installer or ZIP extraction at one folder on the USB drive, such as `F:\CarryCode`. [Download and verification steps](../README.md#проверка-загрузки)
+2. **Open the launcher.** Run `flashGPT.exe` on Windows or `./flashgpt` from the bundle folder on Linux. Create and remember a password, or unlock your existing profile. For English, press **Enter** at the first-run agent prompt to reach the main menu, then choose **6 → 2**.
+3. **Choose an agent and project folder.** Use the arrow keys and **Enter** to open folders, then select **Choose this folder** or press **F2**. Sign in through Codex or use `/connect` in OpenCode.
+4. **Move to another computer.** Exit the CLI, wait for the profile to save, and close the menu before ejecting. Run CarryCode from the same USB bundle and unlock it with the same password.
 
-The CLI runs on the connected computer. Models run remotely and require internet access and a provider sign-in. Bundle checks work offline.
+On Windows, run `Get-FileHash -Algorithm SHA256 <downloaded-file>` in PowerShell and compare the result with the checksum file from the same release. On Linux, run `sha256sum -c SHA256SUMS` in the folder containing the ZIP and `SHA256SUMS`. The Windows installer is unsigned.
 
-<p align="center"><img src="media/menu.png" alt="CarryCode menu with options for Codex, OpenCode, troubleshooting, and bundle checks" width="760"></p>
+## Supported systems
 
-## What you can do
+| OS | Architecture | Start from the bundle folder |
+| --- | --- | --- |
+| Windows 11 | x86-64 | Open `flashGPT.exe` |
+| Ubuntu 24.04 LTS | x86-64 | Run `./flashgpt` in a terminal |
+| Arch Linux | x86-64 | Run `./flashgpt` in a terminal |
 
-| Task | In CarryCode |
-| --- | --- |
-| **Start coding** | Pick a folder with the arrow keys, search by name with **/**, or press **Tab** to revisit a recent folder. |
-| **Troubleshoot** | Investigate in read-only mode, then review and approve a single text replacement in a project file. |
-| **Check the bundle** | See which checks passed, failed, or were skipped, with a next step for each failure. |
-| **Move between computers** | Unlock your profile to use the credentials and settings you saved. Close the menu before ejecting the drive. |
-| **Change your password** | Use menu item **7** to re-encrypt your profile with a new password. |
-| **Open on plug-in** | Use menu item **5** to enable or disable autostart on the current computer. |
+## Requirements and limits
 
-## Inside the terminal
+- **Host access.** Use a trusted computer, an interactive terminal, and standard user permissions. Use a writable USB drive. On Linux, the file permissions and mount options must allow execution.
+- **Cloud access.** Sign in to the provider you use. The model stays on the provider's servers. The installer and local bundle checks can run offline.
+- **What travels.** Your profile stores supported CLI settings and saved sign-in data. Project files stay wherever you keep them. Use a project folder available on each computer.
+- **Troubleshooting.** Menu **4** reports passed, failed, and skipped checks. Menu **3** offers read-only investigation or a reviewed replacement in one existing project text file. Verify the diagnosis before applying a change.
+- **Autostart.** Enable it separately on each computer if you want CarryCode to open when the registered drive is attached. Manual launch works with the executable names above.
 
-### Folder picker
+To update a flashGPT installation, close the launcher and its CLI clients, then select the existing bundle folder. Keep `flashgpt.json` and `profile/` together and use your existing password. The executable names remain compatible with existing shortcuts and scripts.
 
-<img src="media/folders.png" alt="Folder picker with a highlighted selection, recent folders, and keyboard shortcuts" width="760">
+## Contribute
 
-### Diagnose and repair
-
-<img src="media/troubleshooting.png" alt="Troubleshooting menu explaining what the Diagnose and Repair modes can do" width="760">
-
-## Build and contribute
-
-The launcher is written in Rust. Follow the [build instructions](../README.md#сборка) to assemble it with the official CLI binaries, or run `cargo test --locked --workspace` to run the workspace tests. See [profile security](../SECURITY.md) for how local sessions handle credentials.
-
-Found a bug? [Open an issue](https://github.com/harzer228/flashGPT/issues/new) with your operating system, CarryCode version, and steps to reproduce it.
+Try the quick start, report a reproducible bug, or propose an improvement to the USB workflow. [Contributor guide](../CONTRIBUTING.md) · [Issue forms](https://github.com/harzer228/flashGPT/issues/new/choose) · [Profile security](../SECURITY.md)

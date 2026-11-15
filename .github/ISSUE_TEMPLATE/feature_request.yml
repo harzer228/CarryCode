@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest an improvement for portable AI coding or troubleshooting.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: English and Russian proposals are welcome.
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What are you trying to do?
+      description: Describe the workflow, who needs it, and where CarryCode gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What should happen?
+      description: Describe the result you would expect to see. Include an example when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Platforms, workarounds, and trade-offs
+      description: Mention any relevant OS, existing workaround, or effect on old bundles and profiles.

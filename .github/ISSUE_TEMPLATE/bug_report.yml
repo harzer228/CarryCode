@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a reproducible problem with the installer, launcher, profile, or bundled CLI.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English and Russian reports are welcome. Use a test profile, and redact private paths, tokens, and account details before posting.
+        For a security issue, follow [SECURITY.md](https://github.com/harzer228/flashGPT/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: CarryCode version
+      description: Run `./flashgpt --version` or `.\flashGPT.exe --version` from the bundle folder.
+      placeholder: CarryCode 0.1.0-beta.5
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS version, installer or ZIP, USB filesystem, and manual launch or autostart.
+      placeholder: Windows 11, portable ZIP on exFAT, manual launch
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the menu number, selected CLI, and whether a fresh test profile reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual result
+      description: Describe what you expected and what happened. Include any exact error text.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Optional diagnostic output
+      description: Paste relevant, redacted lines from `./flashgpt doctor` or `.\flashGPT.exe doctor`, or attach a sanitized screenshot.
