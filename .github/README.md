@@ -5,6 +5,7 @@
     · <a href="https://github.com/harzer228/flashGPT/releases/latest/download/flashgpt-usb-amd64.zip"><strong>Portable ZIP</strong></a>
     · <a href="https://github.com/harzer228/flashGPT/releases/latest">Release notes and SHA-256</a>
     · <a href="../README.md">На русском</a>
+    · <a href="../CHANGELOG.md">Changelog</a>
   </p>
 </div>
 
@@ -17,6 +18,8 @@
 The source tree includes an experimental Rust agent under menu **8 — CarryCode Agent (alpha)**. It supports custom OpenAI-compatible base URLs and Anthropic Messages, streamed chat, project text search, confirmed replacements in existing files, and confirmed Cargo/npm/unittest tasks. `/model` manages model connections in the terminal: protocol, base URL, model ID, masked API key, context window, input limit, output limit, reasoning level, reasoning API mode, and chat-only mode, plus add/edit/delete/connect and a **t** connection test. `/skills` lists Claude-format `SKILL.md` folders from the project, bundle, user profile and other agents; `/mcp` runs local stdio MCP servers, shows their tools and imports existing Claude Code, Codex and OpenCode configs with a confirmation for every call. `/init` previews and writes a project `AGENTS.md`. Conversations and provider settings use the encrypted USB profile. Use `/provider` for the plain-text provider prompt or `+` to add another named provider. Type `/help` for controls. Scroll the conversation with the mouse wheel, **PgUp/PgDn** or **Shift+Up/Down**; `/exit` or `/quit` returns to the launcher.
 
 `/reasoning` selects off/low/medium/high for the active model and saves it in the profile, or use `/reasoning high` directly. OpenAI-compatible endpoints receive `reasoning_effort` (OpenRouter receives a `reasoning` object); Anthropic receives an extended-thinking budget. Reasoning streams live, is stored with the reply, collapsed to three lines by default and expanded with **F3**; **F2** still toggles tool results. It is not sent back as ordinary history and is counted in the reply token estimate. Signed Anthropic thinking blocks are not replayed because the agent uses a text JSON action protocol; API errors show the response body and `/reasoning off` disables the parameter. The model form rejects input + output combinations that exceed the context window, and the agent refuses an over-limit input before making a network request. Provider failures open a scrollable panel with the HTTP status and response body.
+
+Agent commands: `/provider`, `/model`, `/reasoning`, `/skills`, `/mcp`, `/init`, `/sessions`, `/new`, `/temporary`, `/clear`, `/undo`, `/status`, `/diagnose`, `/code`, `/help`, `/quit` and `/exit`. Enter sends; Tab completes a slash command; Up/Down walks input history or menu items; Esc closes a menu, clears input or stops a reply (it does not leave the agent); F2 toggles tool results; F3 toggles reasoning; PgUp/PgDn, Shift+Up/Down and the mouse wheel scroll the reply; Ctrl-C twice or Ctrl-D exits.
 
 This preview has bounded file reading and context, and its coding quality has not yet been benchmarked against Codex or Claude Code. The release downloads above remain the published launcher release. [Preview instructions and limits](../README.md#carrycode-agent--экспериментальная-альфа)
 
