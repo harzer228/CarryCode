@@ -36,7 +36,7 @@ const CTX_TOKENS: u32 = 128_000;
 const INPUT_LIMIT: usize = 64 * 1024;
 
 /// Commands offered by the slash menu. Descriptions are localized.
-fn commands() -> [(&'static str, &'static str); 15] {
+fn commands() -> [(&'static str, &'static str); 16] {
     [
         (
             "/provider",
@@ -115,6 +115,10 @@ fn commands() -> [(&'static str, &'static str); 15] {
                 "Модель, токены, скорость, время сеанса",
                 "Model, tokens, speed, session time"
             ),
+        ),
+        (
+            "/reasoning",
+            tr!("Уровень рассуждений модели", "Model reasoning level"),
         ),
         (
             "/init",
@@ -352,6 +356,7 @@ impl Editor {
 struct Receipt {
     input: u32,
     output: u32,
+    reasoning: u32,
     duration: f32,
     speed: f32,
     ttft: f32,
@@ -376,7 +381,8 @@ struct Turn {
     reply_started: Option<Instant>,
     first: Option<Instant>,
     chars: usize,
-    counted: usize,
+    reasoning_chars: usize,
+    reasoning_output: u32,
     seen: usize,
 }
 
@@ -384,7 +390,9 @@ struct Turn {
 struct CacheKey {
     messages: usize,
     bytes: usize,
+    reasoning_bytes: usize,
     details: bool,
+    reasoning_details: bool,
     width: usize,
 }
 
@@ -406,10 +414,15 @@ pub struct ModelEntry {
     pub anthropic: bool,
     pub chat_only: bool,
     pub context: u32,
+    pub input: u32,
+    pub output: u32,
+    pub reasoning: super::Reasoning,
+    pub reasoning_api: super::ReasoningApi,
 }
 
 pub enum ModelAction {
     Activate(usize),
+    Test(usize),
     Save {
         index: Option<usize>,
         entry: ModelEntry,
@@ -437,6 +450,11 @@ pub struct Screen {
     started: Instant,
     cache: Option<Cache>,
     context_limit: u32,
+    input_limit: u32,
+    output_limit: u32,
+    usage: u32,
+    reasoning: super::Reasoning,
+    reasoning_details: bool,
     suspended: bool,
 }
 
@@ -462,6 +480,11 @@ impl Screen {
             started: Instant::now(),
             cache: None,
             context_limit: CTX_TOKENS,
+            input_limit: CTX_TOKENS.saturating_sub(4096),
+            output_limit: 4096,
+            usage: 0,
+            reasoning: crate::native::Reasoning::Off,
+            reasoning_details: false,
             suspended: false,
         };
         if let Err(error) = enter() {
@@ -472,8 +495,37 @@ impl Screen {
     }
 
     /// Sets the context window of the active model, used by every ctx readout.
-    pub fn set_context(&mut self, tokens: u32) {
-        self.context_limit = tokens.max(1_000);
+    pub fn set_limits(
+        &mut self,
+        context: u32,
+        input: u32,
+        output: u32,
+        reasoning: super::Reasoning,
+    ) {
+        self.context_limit = context.max(1_000);
+        self.input_limit = input.clamp(1, self.context_limit);
+        self.output_limit = output.max(256);
+        self.reasoning = reasoning;
+    }
+
+    pub fn set_usage(&mut self, tokens: u32) {
+        self.usage = tokens;
+    }
+
+    pub fn report(&mut self, title: &str, body: &str) -> Result<()> {
+        let (terminal_width, _) = terminal::size()?;
+        let width = (usize::from(terminal_width).saturating_sub(8).clamp(36, 96)).saturating_sub(4);
+        let mut lines = Vec::new();
+        for paragraph in body.lines() {
+            if paragraph.trim().is_empty() {
+                lines.push(Line::new());
+                continue;
+            }
+            let mut line = Line::new();
+            line.push(paragraph, Style::fg(render::FG));
+            lines.extend(render::wrap(&line, width));
+        }
+        self.overlay(title, lines)
     }
 
     /// Leaves the alternate screen for a plain prompt (provider setup, task
@@ -573,9 +625,8 @@ impl Screen {
                             } else if !self.editor.is_empty() {
                                 self.editor.clear();
                                 edited = true;
-                            } else {
-                                return Ok(None);
                             }
+                            self.armed = false;
                         }
                         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
                             if !self.editor.is_empty() {
@@ -649,6 +700,7 @@ impl Screen {
                             edited = true;
                         }
                         KeyCode::F(2) => self.details = !self.details,
+                        KeyCode::F(3) => self.reasoning_details = !self.reasoning_details,
                         KeyCode::PageUp => self.scroll = self.scroll.saturating_add(10),
                         KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
                         KeyCode::Char(character) if text_key(key) && !character.is_control() => {
@@ -682,18 +734,21 @@ impl Screen {
         &mut self,
         history: &[Message],
         output: &str,
+        reasoning: &str,
         model: &str,
         directory: &Path,
     ) -> Result<bool> {
-        self.track(output);
+        self.track(output, reasoning);
         self.tick = self.tick.wrapping_add(1);
-        self.draw(history, Some(output), model, directory)?;
+        self.draw(history, Some((output, reasoning)), model, directory)?;
         if event::poll(Duration::from_millis(40))? {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
                     match key.code {
                         KeyCode::Esc => return Ok(true),
+                        KeyCode::F(2) => self.details = !self.details,
+                        KeyCode::F(3) => self.reasoning_details = !self.reasoning_details,
                         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
                             return Ok(true);
                         }
@@ -740,6 +795,7 @@ impl Screen {
         self.selected = 0;
         self.scroll = 0;
         self.armed = false;
+        self.notice.clear();
         self.begin_turn(&line);
         line
     }
@@ -756,39 +812,44 @@ impl Screen {
             reply_started: Some(now),
             first: None,
             chars: 0,
-            counted: 0,
+            reasoning_chars: 0,
+            reasoning_output: 0,
             seen: 0,
         });
     }
 
-    fn track(&mut self, output: &str) {
+    fn track(&mut self, output: &str, reasoning: &str) {
         let Some(turn) = self.turn.as_mut() else {
             return;
         };
-        if output.len() < turn.seen {
+        let seen = output.len() + reasoning.len();
+        if seen < turn.seen {
             if turn.chars > 0 {
                 turn.output = turn.output.saturating_add(estimate(turn.chars));
+            }
+            if turn.reasoning_chars > 0 {
+                turn.reasoning_output = turn
+                    .reasoning_output
+                    .saturating_add(estimate(turn.reasoning_chars));
             }
             turn.reply_started = Some(Instant::now());
             turn.first = None;
             turn.chars = 0;
-            turn.counted = 0;
+            turn.reasoning_chars = 0;
         }
-        turn.seen = output.len();
-        if output.is_empty() {
+        turn.seen = seen;
+        if seen == 0 {
             return;
         }
         let now = Instant::now();
         if turn.reply_started.is_none() {
             turn.reply_started = Some(now);
         }
-        if turn.first.is_none() {
+        if !output.is_empty() && turn.first.is_none() {
             turn.first = Some(now);
         }
-        if turn.counted != output.len() {
-            turn.chars = output.chars().count();
-            turn.counted = output.len();
-        }
+        turn.chars = output.chars().count() + reasoning.chars().count();
+        turn.reasoning_chars = reasoning.chars().count();
     }
 
     fn finish_turn(&mut self) {
@@ -798,6 +859,10 @@ impl Screen {
         let mut output = turn.output;
         if turn.chars > 0 {
             output = output.saturating_add(estimate(turn.chars));
+        }
+        let mut reasoning = turn.reasoning_output;
+        if turn.reasoning_chars > 0 {
+            reasoning = reasoning.saturating_add(estimate(turn.reasoning_chars));
         }
         if output == 0 {
             return;
@@ -823,6 +888,7 @@ impl Screen {
         self.stats.last = Some(Receipt {
             input: turn.input,
             output,
+            reasoning,
             duration,
             speed,
             ttft,
@@ -840,7 +906,7 @@ impl Screen {
     fn draw(
         &mut self,
         history: &[Message],
-        pending: Option<&str>,
+        pending: Option<(&str, &str)>,
         model: &str,
         directory: &Path,
     ) -> Result<()> {
@@ -925,20 +991,40 @@ impl Screen {
             let key = CacheKey {
                 messages: history.len(),
                 bytes: history.iter().map(|message| message.content.len()).sum(),
+                reasoning_bytes: history
+                    .iter()
+                    .map(|message| {
+                        message
+                            .reasoning
+                            .as_deref()
+                            .map_or(0, |reasoning| reasoning.len())
+                    })
+                    .sum(),
                 details: self.details,
+                reasoning_details: self.reasoning_details,
                 width: content,
             };
             if self.cache.as_ref().map(|cache| cache.key) != Some(key) {
-                let lines = history_lines(history, content, self.details);
+                let lines = history_lines(history, content, self.details, self.reasoning_details);
                 let chars = history
                     .iter()
-                    .map(|message| message.content.chars().count())
+                    .map(|message| {
+                        message.content.chars().count()
+                            + message
+                                .reasoning
+                                .as_deref()
+                                .map_or(0, |reasoning| reasoning.chars().count())
+                    })
                     .sum();
                 self.cache = Some(Cache { key, lines, chars });
             }
-            let pending_lines = pending
-                .map(|text| render::assistant(text, content))
-                .unwrap_or_default();
+            let mut pending_lines = Vec::new();
+            if let Some((text, reasoning)) = pending {
+                pending_lines.extend(reasoning_lines(reasoning, content, false, true));
+                if !text.is_empty() {
+                    pending_lines.extend(render::assistant(text, content));
+                }
+            }
             let total =
                 self.cache.as_ref().map_or(0, |cache| cache.lines.len()) + pending_lines.len();
             let max_scroll = total.saturating_sub(conv_rows);
@@ -1154,9 +1240,20 @@ impl Screen {
         let mut line = Line::new();
         line.push(model, Style::dim());
         line.push(
-            format!(" · {} context", render::human(self.context_limit)),
+            format!(
+                " · ctx {} · in {} · out {}",
+                render::human(self.context_limit),
+                render::human(self.input_limit),
+                render::human(self.output_limit)
+            ),
             Style::dim(),
         );
+        if self.reasoning != super::Reasoning::Off {
+            line.push(
+                format!(" · r {}", self.reasoning.label()),
+                Style::fg(render::BRAND),
+            );
+        }
         if self.diagnose {
             line.push(
                 tr!(" · диагностика", " · diagnose"),
@@ -1167,6 +1264,11 @@ impl Screen {
     }
 
     fn status_line(&self, model: &str, width: usize) -> Line {
+        let model = if width < 60 {
+            model.rsplit(" / ").next().unwrap_or(model)
+        } else {
+            model
+        };
         if self.armed {
             let mut line = Line::new();
             line.push("  ", Style::plain());
@@ -1179,8 +1281,12 @@ impl Screen {
             );
             return line.truncate(width);
         }
-        let context = self.context();
-        let percent = context.saturating_mul(100) / self.context_limit;
+        let used = if self.usage > 0 {
+            self.usage
+        } else {
+            self.context()
+        };
+        let percent = used.saturating_mul(100) / self.input_limit.max(1);
         let mut segments: Vec<Line> = Vec::new();
         let mut head = Line::new();
         head.push("  ", Style::plain());
@@ -1190,12 +1296,22 @@ impl Screen {
         segments.push(Line::of(
             format!(
                 "ctx {}/{} ({}%)",
-                render::human(context),
-                render::human(self.context_limit),
+                render::human(used),
+                render::human(self.input_limit),
                 percent
             ),
-            Style::dim(),
+            if percent >= 85 {
+                Style::fg(render::WARN)
+            } else {
+                Style::dim()
+            },
         ));
+        if self.reasoning != super::Reasoning::Off {
+            segments.push(Line::of(
+                format!("r {}", self.reasoning.label()),
+                Style::dim(),
+            ));
+        }
         if self.stats.tin > 0 || self.stats.tout > 0 {
             segments.push(Line::of(
                 format!(
@@ -1277,8 +1393,12 @@ impl Screen {
     }
 
     fn status_panel(&mut self, model: &str, directory: &Path) -> Result<()> {
-        let context = self.context();
-        let percent = context.saturating_mul(100) / self.context_limit;
+        let used = if self.usage > 0 {
+            self.usage
+        } else {
+            self.context()
+        };
+        let percent = used.saturating_mul(100) / self.input_limit.max(1);
         let mode = if self.diagnose {
             tr!("диагностика", "diagnose")
         } else {
@@ -1286,14 +1406,25 @@ impl Screen {
         };
         let rows = [
             (tr!("модель", "model"), model.to_owned()),
+            (tr!("окно", "window"), render::human(self.context_limit)),
+            (tr!("вход", "input"), render::human(self.input_limit)),
+            (tr!("выход", "output"), render::human(self.output_limit)),
             (
-                tr!("контекст", "context"),
+                tr!("занято", "used"),
                 format!(
                     "{} / {} ({}%)",
-                    render::human(context),
-                    render::human(self.context_limit),
+                    render::human(used),
+                    render::human(self.input_limit),
                     percent
                 ),
+            ),
+            (
+                tr!("reasoning", "reasoning"),
+                if self.reasoning == super::Reasoning::Off {
+                    tr!("выкл", "off").to_owned()
+                } else {
+                    self.reasoning.label().to_owned()
+                },
             ),
             (
                 tr!("токены", "tokens"),
@@ -1457,7 +1588,17 @@ impl Screen {
             line.push(" │", border);
             put_line(&mut out, left, top + 1 + row, &line, panel_width)?;
         }
-        let footer: String = footer.chars().take(panel_width.saturating_sub(7)).collect();
+        let footer_limit = panel_width.saturating_sub(7);
+        let footer: String = if footer.chars().count() > footer_limit {
+            let mut text: String = footer
+                .chars()
+                .take(footer_limit.saturating_sub(1))
+                .collect();
+            text.push('…');
+            text
+        } else {
+            footer.to_owned()
+        };
         let hint = format!(" {footer} ");
         let mut last = Line::new();
         last.push("╰─", border);
@@ -1466,17 +1607,18 @@ impl Screen {
         last.push("─".repeat(panel_width.saturating_sub(used + 1)), border);
         last.push("╯", border);
         put_line(&mut out, left, top + 1 + visible, &last, panel_width)?;
-        if let Some((row, column)) = cursor
-            && row < visible
-        {
-            queue!(
-                out,
-                MoveTo(
-                    (left + 2 + column.min(inner.saturating_sub(1))) as u16,
-                    (top + 1 + row) as u16
-                ),
-                Show
-            )?;
+        if let Some((row, column)) = cursor {
+            let row = row.saturating_sub(scroll);
+            if row < visible {
+                queue!(
+                    out,
+                    MoveTo(
+                        (left + 2 + column.min(inner.saturating_sub(1))) as u16,
+                        (top + 1 + row) as u16
+                    ),
+                    Show
+                )?;
+            }
         }
         out.flush()?;
         Ok(Panel { visible })
@@ -1542,17 +1684,25 @@ enum Field {
     Model,
     Key,
     Context,
+    Input,
+    Output,
+    Reasoning,
+    ReasoningApi,
     ChatOnly,
 }
 
 impl Field {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 11] = [
         Self::Name,
         Self::Protocol,
         Self::Url,
         Self::Model,
         Self::Key,
         Self::Context,
+        Self::Input,
+        Self::Output,
+        Self::Reasoning,
+        Self::ReasoningApi,
         Self::ChatOnly,
     ];
 }
@@ -1564,9 +1714,13 @@ struct ModelForm {
     model: Editor,
     key: Editor,
     context: Editor,
+    input: Editor,
+    output: Editor,
     anthropic: bool,
     chat_only: bool,
     key_set: bool,
+    reasoning: super::Reasoning,
+    reasoning_api: super::ReasoningApi,
     focus: usize,
     error: Option<String>,
 }
@@ -1585,9 +1739,25 @@ impl ModelForm {
                     .map(|entry| entry.context.max(1_000).to_string())
                     .unwrap_or_else(|| CTX_TOKENS.to_string()),
             ),
+            input: field(
+                &entry
+                    .map(|entry| entry.input.to_string())
+                    .unwrap_or_else(|| CTX_TOKENS.saturating_sub(4096).to_string()),
+            ),
+            output: field(
+                &entry
+                    .map(|entry| entry.output.to_string())
+                    .unwrap_or_else(|| 4096.to_string()),
+            ),
             anthropic: entry.map(|entry| entry.anthropic).unwrap_or(false),
             chat_only: entry.map(|entry| entry.chat_only).unwrap_or(false),
             key_set: entry.map(|entry| entry.key_set).unwrap_or(false),
+            reasoning: entry
+                .map(|entry| entry.reasoning)
+                .unwrap_or(super::Reasoning::Off),
+            reasoning_api: entry
+                .map(|entry| entry.reasoning_api)
+                .unwrap_or(super::ReasoningApi::Auto),
             focus: 0,
             error: None,
         }
@@ -1597,6 +1767,22 @@ impl ModelForm {
         Field::ALL[self.focus.min(Field::ALL.len() - 1)]
     }
 
+    fn focus_row(&self) -> usize {
+        match self.field() {
+            Field::Name => 1,
+            Field::Protocol => 2,
+            Field::Url => 3,
+            Field::Model => 4,
+            Field::Key => 5,
+            Field::Context => 6,
+            Field::Input => 7,
+            Field::Output => 8,
+            Field::Reasoning => 9,
+            Field::ReasoningApi => 10,
+            Field::ChatOnly => 11,
+        }
+    }
+
     fn editor_mut(&mut self) -> Option<&mut Editor> {
         match self.field() {
             Field::Name => Some(&mut self.name),
@@ -1604,7 +1790,9 @@ impl ModelForm {
             Field::Model => Some(&mut self.model),
             Field::Key => Some(&mut self.key),
             Field::Context => Some(&mut self.context),
-            Field::Protocol | Field::ChatOnly => None,
+            Field::Input => Some(&mut self.input),
+            Field::Output => Some(&mut self.output),
+            Field::Protocol | Field::Reasoning | Field::ReasoningApi | Field::ChatOnly => None,
         }
     }
 
@@ -1650,6 +1838,46 @@ impl ModelForm {
             )
             .to_owned());
         }
+        let input: u32 = self.input.text().trim().parse().map_err(|_| {
+            tr!("Вход — целое число токенов", "Input must be an integer").to_owned()
+        })?;
+        if !(1_000..=context).contains(&input) {
+            return Err(tr!(
+                "Вход: от 1000 до размера контекста",
+                "Input: 1000 up to the context size"
+            )
+            .to_owned());
+        }
+        let output: u32 = self.output.text().trim().parse().map_err(|_| {
+            tr!("Выход — целое число токенов", "Output must be an integer").to_owned()
+        })?;
+        if !(256..=context).contains(&output) {
+            return Err(tr!(
+                "Выход: от 256 до размера контекста",
+                "Output: 256 up to the context size"
+            )
+            .to_owned());
+        }
+        if input.saturating_add(output) > context {
+            return Err(tr!(
+                "Вход + выход больше окна контекста",
+                "Input + output exceed the context window"
+            )
+            .to_owned());
+        }
+        if self.anthropic
+            && self.reasoning != super::Reasoning::Off
+            && self.reasoning_api != super::ReasoningApi::None
+            && let Some(budget) = self.reasoning.budget()
+            && output <= budget
+        {
+            return Err(trf!(
+                "Выход {} должен быть больше бюджета reasoning {}",
+                "Output {} must be greater than the reasoning budget {}",
+                output,
+                budget
+            ));
+        }
         let key = self.key.text();
         Ok(ModelEntry {
             name,
@@ -1660,6 +1888,10 @@ impl ModelForm {
             anthropic: self.anthropic,
             chat_only: self.chat_only,
             context,
+            input,
+            output,
+            reasoning: self.reasoning,
+            reasoning_api: self.reasoning_api,
         })
     }
 
@@ -1792,6 +2024,46 @@ impl ModelForm {
         ) {
             cursor = Some(position);
         }
+        if let Some(position) = push_text(
+            &mut lines,
+            Field::Input,
+            tr!("Вход", "Input"),
+            tr!("лимит входа, токены", "input limit, tokens"),
+            &self.input,
+        ) {
+            cursor = Some(position);
+        }
+        if let Some(position) = push_text(
+            &mut lines,
+            Field::Output,
+            tr!("Выход", "Output"),
+            tr!("лимит ответа, токены", "reply limit, tokens"),
+            &self.output,
+        ) {
+            cursor = Some(position);
+        }
+        let mut reasoning = label(Field::Reasoning, tr!("Reasoning", "Reasoning"));
+        let style = if focused == Field::Reasoning {
+            Style::brand().bold()
+        } else {
+            Style::fg(render::FG)
+        };
+        reasoning.push(format!("‹ {} ›", self.reasoning.label()), style);
+        if focused == Field::Reasoning {
+            reasoning.push(tr!("   ←/→ — сменить", "   ←/→ to change"), Style::dim());
+        }
+        lines.push(reasoning.truncate(inner));
+        let mut api = label(Field::ReasoningApi, tr!("Параметр", "Reasoning API"));
+        let style = if focused == Field::ReasoningApi {
+            Style::brand().bold()
+        } else {
+            Style::fg(render::FG)
+        };
+        api.push(format!("‹ {} ›", self.reasoning_api.label()), style);
+        if focused == Field::ReasoningApi {
+            api.push(tr!("   ←/→ — сменить", "   ←/→ to change"), Style::dim());
+        }
+        lines.push(api.truncate(inner));
         let mut chat = label(Field::ChatOnly, tr!("Режим", "Mode"));
         let mark = if self.chat_only { "[ ]" } else { "[x]" };
         chat.push(
@@ -1897,7 +2169,21 @@ fn model_lines(
             },
             Style::dim(),
         );
-        detail.push(format!(" · {}", render::human(entry.context)), Style::dim());
+        detail.push(
+            format!(" · ctx {}", render::human(entry.context)),
+            Style::dim(),
+        );
+        detail.push(
+            format!(" · in {}", render::human(entry.input)),
+            Style::dim(),
+        );
+        detail.push(
+            format!(" · out {}", render::human(entry.output)),
+            Style::dim(),
+        );
+        if entry.reasoning != super::Reasoning::Off {
+            detail.push(format!(" · r {}", entry.reasoning.label()), Style::dim());
+        }
         if entry.chat_only {
             detail.push(tr!(" · только чат", " · chat only"), Style::dim());
         }
@@ -1927,13 +2213,97 @@ impl Screen {
         Ok(())
     }
 
+    /// `/reasoning`: pick a level for the active model.
+    pub fn reasoning(&mut self, current: super::Reasoning) -> Result<Option<super::Reasoning>> {
+        let levels = [
+            super::Reasoning::Off,
+            super::Reasoning::Low,
+            super::Reasoning::Medium,
+            super::Reasoning::High,
+        ];
+        let mut selected = levels
+            .iter()
+            .position(|level| *level == current)
+            .unwrap_or(0);
+        loop {
+            let mut body = vec![Line::new()];
+            for (index, level) in levels.iter().enumerate() {
+                let is_selected = index == selected;
+                let mut row = Line::new();
+                row.push("  ", Style::plain());
+                row.push(
+                    if is_selected { "›" } else { " " },
+                    if is_selected {
+                        Style::brand().bold()
+                    } else {
+                        Style::dim()
+                    },
+                );
+                row.push(if *level == current { " ●" } else { "  " }, Style::brand());
+                row.push(" ", Style::plain());
+                row.push(
+                    level.label(),
+                    if is_selected {
+                        Style::brand().bold()
+                    } else {
+                        Style::fg(render::FG)
+                    },
+                );
+                if let Some(budget) = level.budget() {
+                    row.push(format!("  · budget {budget}"), Style::dim());
+                } else {
+                    row.push(tr!("  · не отправлять", "  · do not send"), Style::dim());
+                }
+                body.push(row);
+            }
+            body.push(Line::new());
+            body.push(Line::of(
+                tr!(
+                    "Уровень хранится в профиле для этой модели. F3 — раскрыть reasoning в истории.",
+                    "The level is saved in the profile for this model. F3 expands reasoning in history."
+                ),
+                Style::dim(),
+            ));
+            self.draw_panel(
+                tr!("Reasoning", "Reasoning"),
+                tr!(
+                    " ↑↓ — выбор · Enter — применить · Esc — отмена ",
+                    " ↑↓ — select · Enter — apply · Esc — cancel "
+                ),
+                &body,
+                0,
+                None,
+            )?;
+            match event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    let key = normalize_key(key);
+                    match key.code {
+                        KeyCode::Up => selected = selected.saturating_sub(1),
+                        KeyCode::Down => selected = (selected + 1).min(levels.len() - 1),
+                        KeyCode::Home => selected = 0,
+                        KeyCode::End => selected = levels.len() - 1,
+                        KeyCode::Enter => return Ok(Some(levels[selected])),
+                        KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+                        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                            return Ok(None);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// The `/model` screen: list, connect, add, edit and delete saved model
     /// connections without leaving the alternate screen.
     pub fn models(&mut self, entries: &[ModelEntry], active: Option<usize>) -> Result<ModelAction> {
         let mut selected = active.unwrap_or(0).min(entries.len().saturating_sub(1));
         let mut form: Option<ModelForm> = None;
         let mut error: Option<String> = None;
+        let mut form_scroll = 0usize;
         loop {
+            let term_width = usize::from(terminal::size()?.0);
             let (title, footer, body, cursor) = if let Some(form) = &form {
                 let width = terminal::size()?.0;
                 let inner = usize::from(width)
@@ -1948,25 +2318,50 @@ impl Screen {
                     } else {
                         tr!("Новая модель", "New model")
                     },
-                    tr!(
-                        " Tab/↑↓ — поле · Space/←→ — тумблер · Enter — сохранить · Esc — отмена ",
-                        " Tab/↑↓ — field · Space/←→ — toggle · Enter — save · Esc — cancel "
-                    ),
+                    if term_width >= 72 {
+                        tr!(
+                            " Tab/↑↓ — поле · Space/←→ — тумблер · Enter — сохранить · Esc — отмена ",
+                            " Tab/↑↓ — field · Space/←→ — toggle · Enter — save · Esc — cancel "
+                        )
+                    } else {
+                        tr!(" Tab · Enter — ок · Esc ", " Tab · Enter — ok · Esc ")
+                    },
                     lines,
                     cursor,
                 )
             } else {
                 (
                     tr!("Модели", "Models"),
-                    tr!(
-                        " ↑↓ · Enter подключить · a новая · e правка · d удалить · Esc ",
-                        " ↑↓ · Enter connect · a new · e edit · d delete · Esc "
-                    ),
+                    if term_width >= 72 {
+                        tr!(
+                            " ↑↓ · Enter подключить · t тест · a/e/d · Esc ",
+                            " ↑↓ · Enter connect · t test · a/e/d · Esc "
+                        )
+                    } else {
+                        tr!(
+                            " ↑↓ · Enter · t · a/e/d · Esc ",
+                            " ↑↓ · Enter · t · a/e/d · Esc "
+                        )
+                    },
                     model_lines(entries, selected, active, error.as_deref()),
                     None,
                 )
             };
-            self.draw_panel(title, footer, &body, 0, cursor)?;
+            let focus_row = form.as_ref().map(ModelForm::focus_row);
+            if let Some(row) = focus_row {
+                let visible = usize::from(terminal::size()?.1)
+                    .saturating_sub(4)
+                    .min(body.len());
+                if row < form_scroll {
+                    form_scroll = row;
+                } else if row >= form_scroll.saturating_add(visible) {
+                    form_scroll = row.saturating_add(1).saturating_sub(visible);
+                }
+                form_scroll = form_scroll.min(body.len().saturating_sub(visible));
+            } else {
+                form_scroll = 0;
+            }
+            self.draw_panel(title, footer, &body, form_scroll, cursor)?;
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
@@ -1988,20 +2383,30 @@ impl Screen {
                                 }
                                 Err(message) => form.error = Some(message),
                             },
-                            KeyCode::Left => {
-                                if form.field() == Field::Protocol {
-                                    form.anthropic = !form.anthropic;
-                                } else if let Some(editor) = form.editor_mut() {
-                                    editor.left();
+                            KeyCode::Left => match form.field() {
+                                Field::Protocol => form.anthropic = !form.anthropic,
+                                Field::Reasoning => form.reasoning = form.reasoning.next(),
+                                Field::ReasoningApi => {
+                                    form.reasoning_api = form.reasoning_api.next()
                                 }
-                            }
-                            KeyCode::Right => {
-                                if form.field() == Field::Protocol {
-                                    form.anthropic = !form.anthropic;
-                                } else if let Some(editor) = form.editor_mut() {
-                                    editor.right();
+                                _ => {
+                                    if let Some(editor) = form.editor_mut() {
+                                        editor.left();
+                                    }
                                 }
-                            }
+                            },
+                            KeyCode::Right => match form.field() {
+                                Field::Protocol => form.anthropic = !form.anthropic,
+                                Field::Reasoning => form.reasoning = form.reasoning.next(),
+                                Field::ReasoningApi => {
+                                    form.reasoning_api = form.reasoning_api.next()
+                                }
+                                _ => {
+                                    if let Some(editor) = form.editor_mut() {
+                                        editor.right();
+                                    }
+                                }
+                            },
                             KeyCode::Char(' ') if form.field() == Field::ChatOnly => {
                                 form.chat_only = !form.chat_only;
                             }
@@ -2029,7 +2434,6 @@ impl Screen {
                                 cancel = true;
                             }
                             KeyCode::Char(character) if key.modifiers == KeyModifiers::CONTROL => {
-                                let field = form.field();
                                 if let Some(editor) = form.editor_mut() {
                                     match character {
                                         'u' => editor.kill_to_start(),
@@ -2040,18 +2444,15 @@ impl Screen {
                                         _ => {}
                                     }
                                 }
-                                if field == Field::Context {
-                                    form.context
-                                        .buffer
-                                        .retain(|character| character.is_ascii_digit());
-                                }
                             }
                             KeyCode::Char(character)
                                 if key.modifiers == KeyModifiers::NONE
                                     || key.modifiers == KeyModifiers::SHIFT =>
                             {
                                 let field = form.field();
-                                if field == Field::Context && !character.is_ascii_digit() {
+                                if matches!(field, Field::Context | Field::Input | Field::Output)
+                                    && !character.is_ascii_digit()
+                                {
                                     continue;
                                 }
                                 if let Some(editor) = form.editor_mut() {
@@ -2075,6 +2476,9 @@ impl Screen {
                             }
                             KeyCode::Enter if !entries.is_empty() => {
                                 return Ok(ModelAction::Activate(selected));
+                            }
+                            KeyCode::Char('t') | KeyCode::Char('т') if !entries.is_empty() => {
+                                return Ok(ModelAction::Test(selected));
                             }
                             KeyCode::Char('a') | KeyCode::Char('а') | KeyCode::Char('ф') => {
                                 error = None;
@@ -2130,7 +2534,10 @@ impl Screen {
                             .chars()
                             .filter(|character| !character.is_control())
                             .collect();
-                        let filtered: String = if form.field() == Field::Context {
+                        let filtered: String = if matches!(
+                            form.field(),
+                            Field::Context | Field::Input | Field::Output
+                        ) {
                             filtered
                                 .chars()
                                 .filter(|character| character.is_ascii_digit())
@@ -2774,15 +3181,17 @@ fn receipt_line(receipt: Receipt, width: usize) -> Line {
         ),
         Style::dim(),
     );
-    let extras = [
-        format!("{:.1}s", receipt.duration),
-        format!("{:.0} tok/s", receipt.speed),
-        format!(
-            "{} {:.1}s",
-            tr!("первый токен", "first token"),
-            receipt.ttft
-        ),
-    ];
+    let mut extras = Vec::new();
+    if receipt.reasoning > 0 {
+        extras.push(format!("r ~{}", render::human(receipt.reasoning)));
+    }
+    extras.push(format!("{:.1}s", receipt.duration));
+    extras.push(format!("{:.0} tok/s", receipt.speed));
+    extras.push(format!(
+        "{} {:.1}s",
+        tr!("первый токен", "first token"),
+        receipt.ttft
+    ));
     for extra in extras {
         let piece = Line::of(format!(" · {extra}"), Style::dim());
         if line.width().saturating_add(piece.width()) > width {
@@ -2811,13 +3220,69 @@ fn join_segments(segments: &[Line], width: usize) -> Line {
     line
 }
 
-fn history_lines(history: &[Message], width: usize, details: bool) -> Vec<Line> {
+fn reasoning_lines(reasoning: &str, width: usize, open: bool, live: bool) -> Vec<Line> {
+    let text = reasoning.trim_end();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut body = Vec::new();
+    for raw in text.lines() {
+        if raw.trim().is_empty() {
+            body.push(Line::of("  │", Style::dim()));
+            continue;
+        }
+        let mut line = Line::new();
+        line.push(raw, Style::dim());
+        for row in render::wrap(&line, width.saturating_sub(4)) {
+            let mut prefixed = Line::of("  │ ", Style::dim());
+            prefixed.extend(row);
+            body.push(prefixed);
+        }
+    }
+    let limit = if live {
+        2
+    } else if open {
+        80
+    } else {
+        3
+    };
+    let start = if live {
+        body.len().saturating_sub(limit)
+    } else {
+        0
+    };
+    let mut lines = Vec::new();
+    let mut head = Line::of("  │ ", Style::dim());
+    head.push(tr!("reasoning", "reasoning"), Style::brand());
+    lines.push(head);
+    for row in body.iter().skip(start).take(limit) {
+        lines.push(row.clone());
+    }
+    if !live && body.len() > limit {
+        lines.push(Line::of(
+            format!("  │ … +{} · F3", body.len() - limit),
+            Style::dim(),
+        ));
+    }
+    lines.push(Line::new());
+    lines
+}
+
+fn history_lines(
+    history: &[Message],
+    width: usize,
+    details: bool,
+    reasoning_details: bool,
+) -> Vec<Line> {
     let mut lines = Vec::new();
     for message in history {
         if message.role == "assistant" {
+            if let Some(reasoning) = message.reasoning.as_deref() {
+                lines.extend(reasoning_lines(reasoning, width, reasoning_details, false));
+            }
             if let Some(action) = super::parse_action(&message.content) {
                 lines.push(action_line(&action));
-            } else {
+            } else if !message.content.is_empty() {
                 lines.extend(render::assistant(&message.content, width));
             }
         } else if message.content.starts_with("Tool result") {
@@ -2921,8 +3386,8 @@ fn help_lines() -> Vec<Line> {
     lines.push(row(
         "Esc",
         tr!(
-            "остановить ответ, очистить ввод или выйти",
-            "stop the reply, clear the input or leave"
+            "остановить ответ, закрыть меню или очистить ввод",
+            "stop the reply, close the menu or clear the input"
         ),
     ));
     lines.push(row(
@@ -2930,6 +3395,13 @@ fn help_lines() -> Vec<Line> {
         tr!(
             "показать или скрыть результаты инструментов",
             "show or hide tool results"
+        ),
+    ));
+    lines.push(row(
+        "F3",
+        tr!(
+            "раскрыть или скрыть reasoning",
+            "expand or collapse reasoning"
         ),
     ));
     lines.push(row(
@@ -2956,7 +3428,7 @@ mod tests {
 
     #[test]
     fn the_menu_filters_commands_by_prefix() {
-        assert_eq!(menu_items("/", false, false).len(), 15);
+        assert_eq!(menu_items("/", false, false).len(), 16);
         let filtered = menu_items("/st", false, false);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0, "/status");
@@ -2987,12 +3459,17 @@ mod tests {
             started: Instant::now(),
             cache: None,
             context_limit: CTX_TOKENS,
+            input_limit: CTX_TOKENS.saturating_sub(4096),
+            output_limit: 4096,
+            usage: 0,
+            reasoning: crate::native::Reasoning::Off,
+            reasoning_details: false,
             suspended: true,
         };
         screen.begin_turn("prompt");
-        screen.track("первый ответ");
-        screen.track("");
-        screen.track("второй ответ");
+        screen.track("первый ответ", "");
+        screen.track("", "");
+        screen.track("второй ответ", "");
         screen.finish_turn();
         let receipt = screen.stats.last.expect("receipt");
         assert_eq!(
@@ -3007,9 +3484,10 @@ mod tests {
         let message = Message {
             role: "user".into(),
             content: "Tool result (untrusted file content)\nfn agent() {}".into(),
+            reasoning: None,
         };
-        let compact = history_lines(std::slice::from_ref(&message), 60, false);
-        let full = history_lines(std::slice::from_ref(&message), 60, true);
+        let compact = history_lines(std::slice::from_ref(&message), 60, false, false);
+        let full = history_lines(std::slice::from_ref(&message), 60, true, false);
         assert!(compact.iter().any(|line| line.plain_text().contains("F2")));
         assert!(
             full.iter()
@@ -3096,5 +3574,56 @@ mod tests {
         assert_eq!(estimate(1), 1);
         assert_eq!(estimate(4), 1);
         assert_eq!(estimate(5), 2);
+    }
+    #[test]
+    fn reasoning_history_collapses_and_f3_expands() {
+        let message = Message {
+            role: "assistant".into(),
+            content: "answer".into(),
+            reasoning: Some("one\ntwo\nthree\nfour".into()),
+        };
+        let compact = history_lines(std::slice::from_ref(&message), 60, false, false);
+        let full = history_lines(std::slice::from_ref(&message), 60, false, true);
+        let compact_text: Vec<String> = compact.iter().map(|line| line.plain_text()).collect();
+        let full_text: Vec<String> = full.iter().map(|line| line.plain_text()).collect();
+        assert!(compact_text.iter().any(|line| line.contains("reasoning")));
+        assert!(compact_text.iter().any(|line| line.contains("+1")));
+        assert!(compact_text.iter().any(|line| line.contains("F3")));
+        assert!(!compact_text.iter().any(|line| line.contains("four")));
+        assert!(full_text.iter().any(|line| line.contains("four")));
+        assert!(!full_text.iter().any(|line| line.contains("+1")));
+    }
+
+    #[test]
+    fn model_form_rejects_over_budget_limits() {
+        let mut form = ModelForm::new(None, None);
+        form.name = Editor::from("Test");
+        form.url = Editor::from("https://example.org/v1");
+        form.model = Editor::from("model");
+        form.context = Editor::from("10000");
+        form.input = Editor::from("9000");
+        form.output = Editor::from("2000");
+        assert!(form.entry().is_err());
+        form.output = Editor::from("1000");
+        assert!(form.entry().is_ok());
+    }
+
+    #[test]
+    fn anthropic_reasoning_requires_larger_output() {
+        let mut form = ModelForm::new(None, None);
+        form.name = Editor::from("Test");
+        form.url = Editor::from("https://example.org/v1");
+        form.model = Editor::from("model");
+        form.anthropic = true;
+        form.context = Editor::from("10000");
+        form.input = Editor::from("5000");
+        form.output = Editor::from("4000");
+        form.reasoning = crate::native::Reasoning::High;
+        assert!(form.entry().is_err());
+        form.output = Editor::from("5000");
+        assert!(form.entry().is_ok());
+        form.reasoning_api = crate::native::ReasoningApi::None;
+        form.output = Editor::from("4000");
+        assert!(form.entry().is_ok());
     }
 }
