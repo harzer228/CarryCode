@@ -16,6 +16,7 @@ mod bundle;
 mod diagnostics;
 mod folders;
 mod language;
+mod native;
 mod platform;
 mod profile;
 mod recent;
@@ -173,8 +174,8 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
         println!(
             "{}",
             trf!(
-                "\n1  Кодить с Codex\n2  Кодить с OpenCode\n3  Разобраться с проблемой\n4  Проверить флешку и соединение\n5  Автозапуск: {startup}\n6  Язык / Language\n7  Сменить пароль\n0  Выйти\n",
-                "\n1  Code with Codex\n2  Code with OpenCode\n3  Troubleshoot a problem\n4  Check drive and connection\n5  Autostart: {startup}\n6  Language / Язык\n7  Change password\n0  Exit\n"
+                "\n1  Кодить с Codex\n2  Кодить с OpenCode\n3  Разобраться с проблемой\n4  Проверить флешку и соединение\n5  Автозапуск: {startup}\n6  Язык / Language\n8  CarryCode Agent (alpha)\n7  Сменить пароль\n0  Выйти\n",
+                "\n1  Code with Codex\n2  Code with OpenCode\n3  Troubleshoot a problem\n4  Check drive and connection\n5  Autostart: {startup}\n6  Language / Язык\n8  CarryCode Agent (alpha)\n7  Change password\n0  Exit\n"
             )
         );
         match prompt(tr!("Выбери пункт: ", "Choose an option: "))?.as_deref() {
@@ -276,6 +277,23 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
             }
             Some("6") => {
                 if let Err(error) = choose_language(&resolve_root) {
+                    eprintln!("CarryCode: {error:#}");
+                }
+            }
+            Some("8") => {
+                let result = (|| -> Result<()> {
+                    let root = resolve_root()?;
+                    profile.set_root(&root)?;
+                    if let Some(directory) = folders::pick(&workspace, &root, &profile.recent)? {
+                        workspace = directory;
+                        profile.recent.remember(&root, &workspace);
+                        let result = native::run(&mut profile, &root, &workspace);
+                        finish_profile(&mut profile, &resolve_root)?;
+                        result?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
                     eprintln!("CarryCode: {error:#}");
                 }
             }

@@ -115,6 +115,7 @@ jobs:
           path: dist/launchers/linux-amd64
       - run: cargo run --locked --release -p xtask -- prepare
       - run: cargo run --locked --release -p xtask -- package
+      - run: cargo run --locked --release -p xtask -- package-lite
       - name: Build Windows setup
         shell: pwsh
         run: ./installer/build.ps1 -Version ($env:GITHUB_REF_NAME.Substring(1))
@@ -132,4 +133,5 @@ jobs:
           fi
           gh release create "$GITHUB_REF_NAME" "${flags[@]}" \
             dist/flashgpt-usb-amd64.zip dist/SHA256SUMS \
+            dist/carrycode-lite-amd64.zip dist/SHA256SUMS-lite \
             dist/flashGPT-setup-windows-x64.exe dist/flashGPT-setup-windows-x64.exe.sha256

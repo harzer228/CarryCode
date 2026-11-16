@@ -12,6 +12,12 @@
 
 **Fix problems. Code anywhere.** The USB drive carries the tools and profile. Models run on your provider's servers. AI features require internet access and a provider sign-in.
 
+## Native agent preview
+
+The source tree includes an experimental Rust agent under menu **8 — CarryCode Agent (alpha)**. It supports custom OpenAI-compatible base URLs and Anthropic Messages, streamed chat, project text search, confirmed replacements in existing files, and confirmed Cargo/npm/unittest tasks. Conversations and provider settings use the encrypted USB profile. Use `/provider` to switch between saved connections or add another named provider with `+`. Type `/help` for controls.
+
+This preview has bounded file reading and context, and its coding quality has not yet been benchmarked against Codex or Claude Code. The release downloads above remain the published launcher release. [Preview instructions and limits](../README.md#carrycode-agent--экспериментальная-альфа)
+
 ## Demo
 
 Plug in the USB drive, open CarryCode, pick Codex or OpenCode, and choose the project folder. The demo uses a test profile and stops before provider sign-in.

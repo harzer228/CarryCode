@@ -693,6 +693,11 @@ mod tests {
         fs::create_dir_all(work.join("codex"))?;
         fs::create_dir_all(work.join("oc-data/opencode"))?;
         fs::create_dir_all(work.join("tmp"))?;
+        fs::create_dir_all(work.join("oc-state/carrycode-agent"))?;
+        fs::write(
+            work.join("oc-state/carrycode-agent/state.json"),
+            b"synthetic-agent-state",
+        )?;
         fs::write(work.join("codex/auth.json"), b"synthetic-token")?;
         fs::write(work.join("oc-data/opencode/opencode.db"), b"synthetic-db")?;
         fs::write(work.join("tmp/private.txt"), b"session scratch")?;
@@ -718,6 +723,10 @@ mod tests {
         assert_eq!(
             fs::read(destination.join("oc-data/opencode/opencode.db"))?,
             b"synthetic-db"
+        );
+        assert_eq!(
+            fs::read(destination.join("oc-state/carrycode-agent/state.json"))?,
+            b"synthetic-agent-state"
         );
         assert!(!destination.join("tmp").exists());
         assert!(extract(&file, &secret, "other-marker", None).is_err());

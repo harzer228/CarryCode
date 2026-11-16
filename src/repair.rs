@@ -111,7 +111,23 @@ pub fn review(root: &Path) -> Result<()> {
     let Some(input) = read_proposal()? else {
         return Ok(());
     };
-    let request = parse_request(&input)?;
+    review_json(root, &input)
+}
+
+pub struct Undo {
+    proposal: Proposal,
+}
+impl Undo {
+    pub fn apply(self) -> Result<()> {
+        self.proposal.apply(true)?;
+        Ok(())
+    }
+}
+pub fn review_json(root: &Path, input: &str) -> Result<()> {
+    review_with_undo(root, input).map(|_| ())
+}
+pub fn review_with_undo(root: &Path, input: &str) -> Result<Option<Undo>> {
+    let request = parse_request(input)?;
     let proposal = Proposal::new(root, &request.path, &request.before, &request.after)?;
     println!(
         "{}",
@@ -134,6 +150,14 @@ pub fn review(root: &Path) -> Result<()> {
         "Введи {code}, чтобы применить замену, или Enter для отмены: ",
         "Type {code} to apply the replacement, or press Enter to cancel: "
     ))?;
+    let reverse = Proposal {
+        root: proposal.root.clone(),
+        relative: proposal.relative.clone(),
+        original: proposal.updated.clone(),
+        updated: proposal.original.clone(),
+        removed: proposal.added.clone(),
+        added: proposal.removed.clone(),
+    };
     if proposal.apply(answer.as_deref() == Some(code.as_str()))? {
         println!(
             "{}",
@@ -142,10 +166,10 @@ pub fn review(root: &Path) -> Result<()> {
                 "Replacement applied. Repeat the action that triggered the issue."
             )
         );
-    } else {
-        println!("{}", tr!("Замена отменена.", "Replacement canceled."));
+        return Ok(Some(Undo { proposal: reverse }));
     }
-    Ok(())
+    println!("{}", tr!("Замена отменена.", "Replacement canceled."));
+    Ok(None)
 }
 
 fn parse_request(input: &str) -> Result<Request> {
