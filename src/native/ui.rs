@@ -59,7 +59,7 @@ impl Screen {
             }
             out.flush()?;
             if let Event::Key(key) = event::read()?
-                && matches!(key.code, KeyCode::Enter | KeyCode::Esc)
+                && dismiss_help(key)
             {
                 break;
             }
@@ -307,6 +307,9 @@ impl Drop for Screen {
         let _ = terminal::disable_raw_mode();
     }
 }
+fn dismiss_help(key: crossterm::event::KeyEvent) -> bool {
+    key.kind != KeyEventKind::Release && matches!(key.code, KeyCode::Enter | KeyCode::Esc)
+}
 fn panel_lines(history: &[Message]) -> String {
     let mut plan = String::new();
     let mut files = Vec::new();
@@ -371,6 +374,19 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn help_ignores_the_release_of_the_key_that_opened_it() {
+        use crossterm::event::KeyEvent;
+        assert!(!dismiss_help(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            KeyEventKind::Release
+        )));
+        assert!(dismiss_help(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        )));
+    }
     #[test]
     fn terminal_output_strips_control_sequences_and_wraps_unicode() {
         assert!(!wrap("hello\x1b[2J", 80).join("").contains('\x1b'));
