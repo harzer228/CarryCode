@@ -592,7 +592,11 @@ impl Screen {
             return Ok(Some(self.submit(&line)));
         }
         loop {
-            self.draw(history, None, model, directory)?;
+            // Coalesce a burst of keystrokes into one frame instead of
+            // clearing and redrawing the whole screen for every character.
+            if !event::poll(Duration::ZERO)? {
+                self.draw(history, None, model, directory)?;
+            }
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
@@ -647,6 +651,12 @@ impl Screen {
                             if self.editor.is_empty() {
                                 return Ok(None);
                             }
+                        }
+                        KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            self.scroll = self.scroll.saturating_add(5);
+                        }
+                        KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            self.scroll = self.scroll.saturating_sub(5);
                         }
                         KeyCode::Up => {
                             if count > 0 {
@@ -765,6 +775,12 @@ impl Screen {
                         KeyCode::F(3) => self.reasoning_details = !self.reasoning_details,
                         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
                             return Ok(true);
+                        }
+                        KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            self.scroll = self.scroll.saturating_add(5);
+                        }
+                        KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            self.scroll = self.scroll.saturating_sub(5);
                         }
                         KeyCode::Enter => {
                             if !self.queued.trim().is_empty() {
@@ -3443,6 +3459,10 @@ fn help_lines() -> Vec<Line> {
     ));
     lines.push(row(
         "PgUp/PgDn",
+        tr!("прокрутить историю", "scroll history"),
+    ));
+    lines.push(row(
+        "Shift+↑/↓",
         tr!("прокрутить историю", "scroll history"),
     ));
     lines.push(row(
