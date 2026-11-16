@@ -14,7 +14,7 @@
 
 ## Native agent preview
 
-The source tree includes an experimental Rust agent under menu **8 — CarryCode Agent (alpha)**. It supports custom OpenAI-compatible base URLs and Anthropic Messages, streamed chat, project text search, confirmed replacements in existing files, and confirmed Cargo/npm/unittest tasks. Conversations and provider settings use the encrypted USB profile. Use `/provider` to switch between saved connections or add another named provider with `+`. Type `/help` for controls.
+The source tree includes an experimental Rust agent under menu **8 — CarryCode Agent (alpha)**. It supports custom OpenAI-compatible base URLs and Anthropic Messages, streamed chat, project text search, confirmed replacements in existing files, and confirmed Cargo/npm/unittest tasks. `/model` manages model connections in the terminal: protocol, base URL, model ID, masked API key, context window, chat-only mode, add/edit/delete/connect. `/skills` lists Claude-format `SKILL.md` folders from the project, bundle, user profile and other agents; `/mcp` runs local stdio MCP servers, shows their tools and imports existing Claude Code, Codex and OpenCode configs with a confirmation for every call. `/init` previews and writes a project `AGENTS.md`. Conversations and provider settings use the encrypted USB profile. Use `/provider` for the plain-text provider prompt or `+` to add another named provider. Type `/help` for controls.
 
 This preview has bounded file reading and context, and its coding quality has not yet been benchmarked against Codex or Claude Code. The release downloads above remain the published launcher release. [Preview instructions and limits](../README.md#carrycode-agent--экспериментальная-альфа)
 
