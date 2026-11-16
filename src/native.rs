@@ -695,7 +695,7 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
         };
         let command = input.trim_end();
         match command {
-            "/quit" => break,
+            "/quit" | "/exit" => break,
             "/undo" => {
                 if let Some(change) = undo.take() {
                     match change.apply() {

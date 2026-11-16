@@ -13,14 +13,17 @@ use anyhow::Result;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute, queue,
     style::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate,
+        EnterAlternateScreen, LeaveAlternateScreen,
+    },
 };
 use render::{Line, Style};
 use std::{
@@ -36,7 +39,7 @@ const CTX_TOKENS: u32 = 128_000;
 const INPUT_LIMIT: usize = 64 * 1024;
 
 /// Commands offered by the slash menu. Descriptions are localized.
-fn commands() -> [(&'static str, &'static str); 16] {
+fn commands() -> [(&'static str, &'static str); 17] {
     [
         (
             "/provider",
@@ -129,6 +132,7 @@ fn commands() -> [(&'static str, &'static str); 16] {
         ),
         ("/help", tr!("Команды и клавиши", "Commands and keys")),
         ("/quit", tr!("Вернуться в меню", "Return to the launcher")),
+        ("/exit", tr!("Выйти в главное меню", "Exit to the launcher")),
     ]
 }
 
@@ -536,6 +540,7 @@ impl Screen {
         }
         execute!(
             io::stdout(),
+            DisableMouseCapture,
             DisableBracketedPaste,
             SetAttribute(Attribute::Reset),
             ResetColor,
@@ -718,6 +723,15 @@ impl Screen {
                         }
                     }
                 }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.scroll = self.scroll.saturating_add(5);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.scroll = self.scroll.saturating_sub(5);
+                    }
+                    _ => {}
+                },
                 Event::Paste(text) => {
                     self.editor.insert(paste_text(&text).chars());
                     self.selected = 0;
@@ -770,6 +784,15 @@ impl Screen {
                         _ => {}
                     }
                 }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.scroll = self.scroll.saturating_add(5);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.scroll = self.scroll.saturating_sub(5);
+                    }
+                    _ => {}
+                },
                 Event::Paste(text) => {
                     for character in paste_text(&text).chars() {
                         if self.queued.len() >= INPUT_LIMIT {
@@ -914,7 +937,12 @@ impl Screen {
         let width = usize::from(terminal_width);
         let height = usize::from(terminal_height);
         let mut out = io::stdout();
-        queue!(out, MoveTo(0, 0), Clear(ClearType::All))?;
+        queue!(
+            out,
+            BeginSynchronizedUpdate,
+            MoveTo(0, 0),
+            Clear(ClearType::All)
+        )?;
         if width < 40 || height < 14 {
             put_line(
                 &mut out,
@@ -929,6 +957,7 @@ impl Screen {
                 ),
                 width,
             )?;
+            queue!(out, EndSynchronizedUpdate)?;
             out.flush()?;
             return Ok(());
         }
@@ -1180,6 +1209,7 @@ impl Screen {
             let column = margin + 4 + caret;
             queue!(out, MoveTo(column as u16, (box_top + 1) as u16), Show)?;
         }
+        queue!(out, EndSynchronizedUpdate)?;
         out.flush()?;
         Ok(())
     }
@@ -1532,6 +1562,11 @@ impl Screen {
                         _ => {}
                     }
                 }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollUp => scroll = scroll.saturating_sub(3),
+                    MouseEventKind::ScrollDown => scroll = scroll.saturating_add(3),
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -3086,6 +3121,7 @@ impl Drop for Screen {
         }
         let _ = execute!(
             io::stdout(),
+            DisableMouseCapture,
             DisableBracketedPaste,
             SetAttribute(Attribute::Reset),
             ResetColor,
@@ -3101,7 +3137,8 @@ fn enter() -> io::Result<()> {
         io::stdout(),
         EnterAlternateScreen,
         Hide,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        EnableMouseCapture
     )
 }
 
@@ -3409,6 +3446,10 @@ fn help_lines() -> Vec<Line> {
         tr!("прокрутить историю", "scroll history"),
     ));
     lines.push(row(
+        tr!("колесо", "wheel"),
+        tr!("прокрутить историю", "scroll history"),
+    ));
+    lines.push(row(
         "Ctrl-C",
         tr!(
             "очистить ввод; дважды — выйти",
@@ -3428,7 +3469,7 @@ mod tests {
 
     #[test]
     fn the_menu_filters_commands_by_prefix() {
-        assert_eq!(menu_items("/", false, false).len(), 16);
+        assert_eq!(menu_items("/", false, false).len(), 17);
         let filtered = menu_items("/st", false, false);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0, "/status");
