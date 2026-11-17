@@ -1,16 +1,25 @@
 <div align="center">
   <h1><img src="media/banner.png" alt="CarryCode. Fix problems. Code anywhere." width="100%"></h1>
   <p>
-    <a href="https://github.com/harzer228/flashGPT/releases/latest/download/flashGPT-setup-windows-x64.exe"><strong>Windows installer</strong></a>
-    · <a href="https://github.com/harzer228/flashGPT/releases/latest/download/flashgpt-usb-amd64.zip"><strong>Portable ZIP</strong></a>
-    · <a href="https://github.com/harzer228/flashGPT/releases/latest">Release notes and SHA-256</a>
+    <a href="https://github.com/harzer228/flashGPT/releases/download/v0.1.0-beta.6/CarryCode-Lite-Setup-Windows-x64.exe"><strong>Windows Lite</strong></a>
+    · <a href="https://github.com/harzer228/flashGPT/releases/download/v0.1.0-beta.6/CarryCode-Full-Setup-Windows-x64.exe"><strong>Windows Full</strong></a>
+    · <a href="https://github.com/harzer228/flashGPT/releases/tag/v0.1.0-beta.6">Portable ZIPs, release notes and SHA-256</a>
     · <a href="../README.md">На русском</a>
+    · <a href="../CHANGELOG.md">Changelog</a>
   </p>
 </div>
 
 **CarryCode is for developers who switch between computers and want their AI coding setup available on each one.** Take the launcher, Codex CLI, OpenCode, and your encrypted profile on one USB drive. Open a local project to resume coding or investigate a problem.
 
 **Fix problems. Code anywhere.** The USB drive carries the tools and profile. Models run on your provider's servers. AI features require internet access and a provider sign-in.
+
+## Native agent preview
+
+The native agent can create projects, review groups of file changes, and run confirmed PowerShell or Bash commands. Open `/project` for Web, Python, and Rust starters. Use `/tools` for the current tool list.
+
+`/browser` controls installed Chromium, Chrome, or Edge in the background. It exposes the page accessibility tree, console messages and screenshots. Enable **Images** in `/model` to let a vision model inspect a screenshot. On Windows, `/computer` selects a single application window. `/search` uses SearXNG or Brave Search without an approval prompt. The local preset verifies that SearXNG at `127.0.0.1:8080` accepts JSON search requests. Press **Esc** to cancel a pending search. New conversations start in **Approve for me** mode. **F6** changes permissions during a turn. Model settings take effect with the next user message.
+
+Open `/model` to save models and set context, token limits and reasoning for each one. **N** adds a second model with the selected connection. **F4** opens the provider catalog and **F5** checks reasoning with a short test request. Provider errors appear in the chat. Drag over a response and press **Ctrl+C** to copy the selection. [Agent instructions](../README.md#carrycode-agent--экспериментальная-альфа)
 
 ## Demo
 
@@ -25,7 +34,9 @@ Plug in the USB drive, open CarryCode, pick Codex or OpenCode, and choose the pr
 3. **Choose an agent and project folder.** Use the arrow keys and **Enter** to open folders, then select **Choose this folder** or press **F2**. Sign in through Codex or use `/connect` in OpenCode.
 4. **Move to another computer.** Exit the CLI, wait for the profile to save, and close the menu before ejecting. Run CarryCode from the same USB bundle and unlock it with the same password.
 
-On Windows, open PowerShell in the download folder and run `Get-FileHash -Algorithm SHA256 .\flashGPT-setup-windows-x64.exe`. Compare the result with `flashGPT-setup-windows-x64.exe.sha256` from the same release. On Linux, run `sha256sum -c SHA256SUMS` in the folder containing the ZIP and `SHA256SUMS`. The Windows installer is unsigned.
+**Lite** contains the launcher and CarryCode Agent. **Full** also bundles Codex CLI and OpenCode for Windows and Linux. Beta 6 may contain bugs.
+
+On Windows, open PowerShell in the download folder and run `Get-FileHash -Algorithm SHA256 .\CarryCode-Full-Setup-Windows-x64.exe`, or use the Lite filename. Compare the result with the matching `.exe.sha256` file from the same release. For ZIP downloads on Linux, run `sha256sum -c SHA256SUMS` for Full or `sha256sum -c SHA256SUMS-lite` for Lite. The Windows installers are unsigned.
 
 ## Supported systems
 

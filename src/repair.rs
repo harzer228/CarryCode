@@ -111,7 +111,11 @@ pub fn review(root: &Path) -> Result<()> {
     let Some(input) = read_proposal()? else {
         return Ok(());
     };
-    let request = parse_request(&input)?;
+    review_json(root, &input)
+}
+
+fn review_json(root: &Path, input: &str) -> Result<()> {
+    let request = parse_request(input)?;
     let proposal = Proposal::new(root, &request.path, &request.before, &request.after)?;
     println!(
         "{}",
@@ -142,9 +146,9 @@ pub fn review(root: &Path) -> Result<()> {
                 "Replacement applied. Repeat the action that triggered the issue."
             )
         );
-    } else {
-        println!("{}", tr!("Замена отменена.", "Replacement canceled."));
+        return Ok(());
     }
+    println!("{}", tr!("Замена отменена.", "Replacement canceled."));
     Ok(())
 }
 
@@ -247,7 +251,7 @@ fn target(root: &Path, relative: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn is_link(metadata: &Metadata) -> bool {
+pub(crate) fn is_link(metadata: &Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -280,7 +284,7 @@ fn read_text(path: &Path) -> Result<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn replace(path: &Path, draft: &Path, _stage: tempfile::TempDir) -> Result<()> {
+pub(crate) fn replace(path: &Path, draft: &Path, _stage: tempfile::TempDir) -> Result<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let metadata = fs::metadata(path)?;
     ensure!(
@@ -318,7 +322,7 @@ fn replace(path: &Path, draft: &Path, _stage: tempfile::TempDir) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn replace(path: &Path, draft: &Path, stage: tempfile::TempDir) -> Result<()> {
+pub(crate) fn replace(path: &Path, draft: &Path, stage: tempfile::TempDir) -> Result<()> {
     use std::ptr::null_mut;
     use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
     let backup = stage.path().join("original");

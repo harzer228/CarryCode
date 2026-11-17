@@ -151,10 +151,11 @@ mod windows {
         Foundation::{CloseHandle, LocalFree},
         Security::{
             Authorization::{
-                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+                ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                SDDL_REVISION_1,
             },
             DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
-            SetFileSecurityW, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+            SetFileSecurityW, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
         },
         Storage::FileSystem::{GetDiskFreeSpaceExW, GetLogicalDrives},
         System::{
@@ -212,8 +213,61 @@ mod windows {
         None
     }
 
+    fn current_user_sid() -> Result<String> {
+        let mut token = ptr::null_mut();
+        unsafe {
+            ensure!(
+                OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) != 0,
+                "{}",
+                std::io::Error::last_os_error()
+            );
+        }
+        let result = (|| -> Result<String> {
+            let mut needed = 0u32;
+            unsafe {
+                GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut needed);
+            }
+            ensure!(needed > 0, "{}", std::io::Error::last_os_error());
+            let mut buffer = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
+            let mut written = 0u32;
+            unsafe {
+                ensure!(
+                    GetTokenInformation(
+                        token,
+                        TokenUser,
+                        buffer.as_mut_ptr().cast(),
+                        needed,
+                        &mut written,
+                    ) != 0,
+                    "{}",
+                    std::io::Error::last_os_error()
+                );
+                let user = &*(buffer.as_ptr().cast::<TOKEN_USER>());
+                let mut raw: *mut u16 = ptr::null_mut();
+                ensure!(
+                    ConvertSidToStringSidW(user.User.Sid, &mut raw) != 0,
+                    "{}",
+                    std::io::Error::last_os_error()
+                );
+                let length = (0..).take_while(|index| *raw.add(*index) != 0).count();
+                let sid = String::from_utf16_lossy(std::slice::from_raw_parts(raw, length));
+                LocalFree(raw.cast());
+                Ok(sid)
+            }
+        })();
+        unsafe {
+            CloseHandle(token);
+        }
+        result
+    }
+
     pub fn protect(path: &Path) -> Result<()> {
-        let sddl = wide(OsStr::new("D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)"));
+        // A filtered or scheduled-task token can have an owner SID other than
+        // the current user. Keep the explicit user ACE as well as OWNER RIGHTS.
+        let sid = current_user_sid()?;
+        let sddl = wide(OsStr::new(&format!(
+            "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;{sid})"
+        )));
         let path = wide(path.as_os_str());
         let mut descriptor = ptr::null_mut();
         // SAFETY: both strings are NUL terminated. The descriptor is released with LocalFree.
