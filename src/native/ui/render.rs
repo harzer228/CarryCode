@@ -53,6 +53,7 @@ pub struct Style {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
     pub bold: bool,
+    pub reversed: bool,
 }
 
 impl Style {
@@ -61,14 +62,14 @@ impl Style {
             fg: None,
             bg: None,
             bold: false,
+            reversed: false,
         }
     }
 
     pub const fn fg(color: Color) -> Self {
         Self {
             fg: Some(color),
-            bg: None,
-            bold: false,
+            ..Self::plain()
         }
     }
 
@@ -97,6 +98,13 @@ impl Style {
     pub fn bold(self) -> Self {
         Self { bold: true, ..self }
     }
+
+    pub fn reversed(self) -> Self {
+        Self {
+            reversed: true,
+            ..self
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -108,9 +116,29 @@ pub struct Span {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Line {
     spans: Vec<Span>,
+    copy_start: usize,
+    copy_end: Option<usize>,
+    continuation: Option<&'static str>,
+    original: Option<String>,
 }
 
 impl Line {
+    pub fn original(&self) -> Option<&str> {
+        self.original.as_deref()
+    }
+
+    pub fn copy_start(&self) -> usize {
+        self.copy_start
+    }
+
+    pub fn copy_end(&self) -> usize {
+        self.copy_end.unwrap_or_else(|| self.width())
+    }
+
+    pub fn copy_separator(&self) -> &'static str {
+        self.continuation.unwrap_or("\n")
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -269,9 +297,10 @@ struct Flow {
 }
 
 impl Flow {
-    fn break_row(&mut self) {
+    fn break_row(&mut self, separator: &'static str) {
         if !self.current.is_blank() {
-            let line = std::mem::take(&mut self.current);
+            let mut line = std::mem::take(&mut self.current);
+            line.continuation = Some(separator);
             self.rows.push(line);
         }
         self.used = 0;
@@ -282,7 +311,7 @@ impl Flow {
         let cells: usize = word.iter().map(|(c, _)| c.width().unwrap_or(0)).sum();
         let gap = usize::from(self.space && !self.current.is_blank());
         if self.used + gap + cells > self.width && !self.current.is_blank() {
-            self.break_row();
+            self.break_row(" ");
         } else if gap == 1 {
             self.current.push(" ", Style::plain());
             self.used += 1;
@@ -298,7 +327,7 @@ impl Flow {
         for (character, style) in word {
             let cell = character.width().unwrap_or(0);
             if self.used + cell > self.width && !self.current.is_blank() {
-                self.break_row();
+                self.break_row("");
             }
             if cell <= self.width {
                 self.current.push(character.to_string(), *style);
@@ -318,8 +347,22 @@ impl Flow {
 /// Echo of a submitted prompt: a green glyph and the text in the foreground.
 pub fn user(text: &str, width: usize) -> Vec<Line> {
     let mut rows = Vec::new();
-    let body = Line::of(text, Style::fg(FG));
-    block(&mut rows, Line::of("› ", Style::brand()), body, width);
+    for (index, raw) in text.split('\n').enumerate() {
+        let start = rows.len();
+        let prefix = if index == 0 {
+            Line::of("› ", Style::brand())
+        } else {
+            Line::of("  ", Style::plain())
+        };
+        block(&mut rows, prefix, Line::of(raw, Style::fg(FG)), width);
+        if let Some(first) = rows.get_mut(start) {
+            first.original = Some(
+                raw.chars()
+                    .filter(|ch| !ch.is_control() || *ch == '\t')
+                    .collect(),
+            );
+        }
+    }
     rows
 }
 
@@ -329,6 +372,8 @@ pub fn assistant(text: &str, width: usize) -> Vec<Line> {
     let mut code = false;
     let mut bullet = true;
     for raw in text.split('\n') {
+        let first_row = rows.len();
+        let source = raw;
         let raw = raw.replace('\t', "    ");
         let trimmed = raw.trim_end().trim_start();
         if trimmed.starts_with("```") {
@@ -345,14 +390,38 @@ pub fn assistant(text: &str, width: usize) -> Vec<Line> {
                 rows.push(code_row(&language, width, Style::dim()));
                 code = true;
             }
+            if let Some(first) = rows.get_mut(first_row) {
+                first.original = Some(
+                    source
+                        .chars()
+                        .filter(|ch| !ch.is_control() || *ch == '\t')
+                        .collect(),
+                );
+            }
             continue;
         }
         if code {
-            rows.push(code_row(&raw, width, Style::fg(CODEFG)));
+            rows.extend(code_rows(&raw, width));
+            if let Some(first) = rows.get_mut(first_row) {
+                first.original = Some(
+                    source
+                        .chars()
+                        .filter(|ch| !ch.is_control() || *ch == '\t')
+                        .collect(),
+                );
+            }
             continue;
         }
         if trimmed.is_empty() {
             rows.push(Line::new());
+            if let Some(first) = rows.get_mut(first_row) {
+                first.original = Some(
+                    source
+                        .chars()
+                        .filter(|ch| !ch.is_control() || *ch == '\t')
+                        .collect(),
+                );
+            }
             continue;
         }
         let first = bullet;
@@ -379,6 +448,14 @@ pub fn assistant(text: &str, width: usize) -> Vec<Line> {
             };
             block(&mut rows, prefix, inline(trimmed), width);
         }
+        if let Some(first) = rows.get_mut(first_row) {
+            first.original = Some(
+                source
+                    .chars()
+                    .filter(|ch| !ch.is_control() || *ch == '\t')
+                    .collect(),
+            );
+        }
     }
     if code {
         rows.push(code_row("", width, Style::dim()));
@@ -389,13 +466,37 @@ pub fn assistant(text: &str, width: usize) -> Vec<Line> {
     rows
 }
 
+fn code_rows(text: &str, width: usize) -> Vec<Line> {
+    let mut rows = Vec::new();
+    let max = width.saturating_sub(1).max(2);
+    let mut start = 0;
+    let mut used = 0;
+    for (index, ch) in text.char_indices() {
+        let cells = ch.width().unwrap_or(0);
+        if used + cells > max && index > start {
+            let mut row = code_row(&text[start..index], width, Style::fg(CODEFG));
+            row.continuation = Some("");
+            rows.push(row);
+            start = index;
+            used = 0;
+        }
+        used += cells;
+    }
+    rows.push(code_row(&text[start..], width, Style::fg(CODEFG)));
+    rows
+}
+
 fn code_row(text: &str, width: usize, text_style: Style) -> Line {
     let base = Style::plain().with_bg(CODE);
     let mut line = Line::new();
     line.push(" ", base);
     line.push(text, text_style.with_bg(CODE));
+    let copy_end = line.width().min(width);
     line.pad_to(width, base);
-    line.truncate(width)
+    let mut line = line.truncate(width);
+    line.copy_start = 1;
+    line.copy_end = Some(copy_end);
+    line
 }
 
 fn block(rows: &mut Vec<Line>, prefix: Line, body: Line, width: usize) {
@@ -414,7 +515,9 @@ fn block(rows: &mut Vec<Line>, prefix: Line, body: Line, width: usize) {
         } else {
             Line::of(" ".repeat(indent), Style::plain())
         };
+        line.continuation = row.continuation;
         line.extend(row);
+        line.copy_start = indent;
         rows.push(line);
     }
 }
@@ -573,7 +676,7 @@ fn palette(foreground: Option<Color>, background: Option<Color>) -> Style {
     Style {
         fg: foreground,
         bg: background,
-        bold: false,
+        ..Style::plain()
     }
 }
 

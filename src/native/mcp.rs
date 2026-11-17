@@ -166,7 +166,12 @@ impl Hub {
             .collect()
     }
 
-    pub fn call(&mut self, server: &str, tool: &str, arguments: &Value) -> Result<String> {
+    pub fn call(
+        &mut self,
+        server: &str,
+        tool: &str,
+        arguments: &Value,
+    ) -> Result<(String, Option<super::Visual>)> {
         let running = self.running.get_mut(server).with_context(|| {
             trf!(
                 "MCP-сервер {} не запущен",
@@ -909,6 +914,7 @@ impl Client {
         for (key, value) in std::env::vars_os() {
             let name = key.to_string_lossy();
             if is_secret(&name) || name == "CARRYCODE_PROFILE" {
+                command.env_remove(key);
                 continue;
             }
             command.env(key, value);
@@ -1107,7 +1113,11 @@ impl Client {
         Ok(tools)
     }
 
-    fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<String> {
+    fn call_tool(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+    ) -> Result<(String, Option<super::Visual>)> {
         let result = self.request(
             "tools/call",
             json!({"name": name, "arguments": arguments}),
@@ -1116,14 +1126,43 @@ impl Client {
         let is_error = result["isError"].as_bool().unwrap_or(false);
         let mut text = content_text(&result);
         if text.len() > MAX_RESULT {
-            text.truncate(MAX_RESULT);
+            let boundary = (0..=MAX_RESULT)
+                .rev()
+                .find(|&index| text.is_char_boundary(index))
+                .unwrap_or(0);
+            text.truncate(boundary);
             text.push_str("\n…MCP result truncated at 64 KiB");
         }
-        Ok(if is_error {
-            format!("MCP tool reported an error:\n{text}")
-        } else {
-            text
-        })
+        if is_error {
+            return Ok((format!("MCP tool reported an error:\n{text}"), None));
+        }
+        let image = result["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find_map(|item| {
+                if item["type"] != "image" {
+                    return None;
+                }
+                let mime = item["mimeType"].as_str()?;
+                let data = item["data"].as_str()?;
+                (matches!(mime, "image/png" | "image/jpeg" | "image/webp")
+                    && data.len() <= 512 * 1024
+                    && {
+                        use base64::Engine as _;
+                        base64::engine::general_purpose::STANDARD
+                            .decode(data)
+                            .is_ok()
+                    })
+                .then(|| super::Visual {
+                    mime: mime.into(),
+                    data: data.into(),
+                })
+            });
+        if image.is_some() {
+            text = text.replace("[image content omitted]", "[image available]");
+        }
+        Ok((text, image))
     }
 }
 

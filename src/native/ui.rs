@@ -7,6 +7,7 @@
 //! suspend/resume handshake used while a reviewed edit or a task runs.
 
 mod render;
+mod selection;
 
 use super::Message;
 use anyhow::Result;
@@ -14,7 +15,8 @@ use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute, queue,
     style::{
@@ -26,6 +28,7 @@ use crossterm::{
     },
 };
 use render::{Line, Style};
+use selection::{Selection, Viewport};
 use std::{
     io::{self, Write},
     path::Path,
@@ -39,15 +42,14 @@ const CTX_TOKENS: u32 = 128_000;
 const INPUT_LIMIT: usize = 64 * 1024;
 
 /// Commands offered by the slash menu. Descriptions are localized.
-fn commands() -> [(&'static str, &'static str); 17] {
+fn commands() -> [(&'static str, &'static str); 22] {
     [
-        (
-            "/provider",
-            tr!(
-                "Сохранённые подключения и новый провайдер",
-                "Saved connections and a new provider"
-            ),
-        ),
+        ("/project", tr!("Создать проект", "Create project")),
+        ("/browser", tr!("Скрытый браузер", "Hidden browser")),
+        ("/computer", tr!("Окно Windows", "Windows window")),
+        ("/tools", tr!("Доступные инструменты", "Available tools")),
+        ("/search", tr!("Поиск в интернете", "Search the web")),
+        ("/permissions", tr!("Режим разрешений", "Permission mode")),
         (
             "/model",
             tr!(
@@ -138,8 +140,8 @@ fn commands() -> [(&'static str, &'static str); 17] {
 
 /// Slash menu contents for the current buffer.
 fn menu_items(text: &str, closed: bool, navigating: bool) -> Vec<(&'static str, &'static str)> {
-    let typed = text.to_lowercase();
-    if closed || navigating || !typed.starts_with('/') || typed.contains(' ') {
+    let typed = text.split_whitespace().last().unwrap_or("").to_lowercase();
+    if closed || navigating || !typed.starts_with('/') || text.ends_with(char::is_whitespace) {
         return Vec::new();
     }
     commands()
@@ -213,9 +215,10 @@ fn paste_text(text: &str) -> String {
                 if characters.peek() == Some(&'\n') {
                     characters.next();
                 }
-                out.push(' ');
+                out.push('\n');
             }
-            '\n' | '\t' => out.push(' '),
+            '\n' => out.push('\n'),
+            '\t' => out.push(' '),
             other if !other.is_control() => out.push(other),
             _ => {}
         }
@@ -243,10 +246,21 @@ impl Editor {
     fn from(text: &str) -> Self {
         let buffer: Vec<char> = text
             .chars()
-            .filter(|character| !character.is_control())
+            .filter(|character| !character.is_control() || *character == '\n')
             .collect();
         let caret = buffer.len();
         Self { buffer, caret }
+    }
+
+    fn prefix(&self) -> String {
+        self.buffer[..self.caret].iter().collect()
+    }
+
+    fn replace_tail(&mut self, chars: usize, replacement: &str) {
+        let start = self.caret.saturating_sub(chars);
+        self.buffer.drain(start..self.caret);
+        self.caret = start;
+        self.insert(replacement.chars());
     }
 
     fn text(&self) -> String {
@@ -262,11 +276,19 @@ impl Editor {
         self.caret = 0;
     }
 
+    fn paste(&mut self, text: &str) {
+        self.insert(paste_text(text).chars());
+    }
+
     fn insert(&mut self, text: impl IntoIterator<Item = char>) {
         if self.buffer.len() >= INPUT_LIMIT {
             return;
         }
-        let text: Vec<char> = text.into_iter().filter(|c| !c.is_control()).collect();
+        let text: Vec<char> = text
+            .into_iter()
+            .filter(|c| !c.is_control() || *c == '\n')
+            .take(INPUT_LIMIT - self.buffer.len())
+            .collect();
         let count = text.len();
         self.buffer.splice(self.caret..self.caret, text);
         self.caret += count;
@@ -331,7 +353,7 @@ impl Editor {
         while start < self.caret
             && self.buffer[start..self.caret]
                 .iter()
-                .map(|character| character.width().unwrap_or(0))
+                .map(|character| editor_width(*character))
                 .sum::<usize>()
                 > width.saturating_sub(1)
         {
@@ -340,19 +362,31 @@ impl Editor {
         let mut shown = String::new();
         let mut used = 0;
         for character in &self.buffer[start..] {
-            let cell = character.width().unwrap_or(0);
+            let cell = editor_width(*character);
             if used + cell > width {
                 break;
             }
-            shown.push(*character);
+            shown.push(if *character == '\n' {
+                '↵'
+            } else {
+                *character
+            });
             used += cell;
         }
         let caret = self.buffer[start..self.caret]
             .iter()
-            .map(|character| character.width().unwrap_or(0))
+            .map(|character| editor_width(*character))
             .sum::<usize>()
             .min(width.saturating_sub(1));
         (shown, caret)
+    }
+}
+
+fn editor_width(character: char) -> usize {
+    if character == '\n' {
+        1
+    } else {
+        character.width().unwrap_or(0)
     }
 }
 
@@ -415,7 +449,10 @@ pub struct ModelEntry {
     /// `Some` only when the user typed a new key in the form.
     pub key: Option<String>,
     pub key_set: bool,
+    pub key_source: Option<usize>,
     pub anthropic: bool,
+    pub responses: bool,
+    pub vision: bool,
     pub chat_only: bool,
     pub context: u32,
     pub input: u32,
@@ -427,12 +464,27 @@ pub struct ModelEntry {
 pub enum ModelAction {
     Activate(usize),
     Test(usize),
+    Duplicate(usize),
+    Catalog {
+        index: Option<usize>,
+        entry: ModelEntry,
+    },
+    Auto {
+        index: Option<usize>,
+        entry: ModelEntry,
+    },
     Save {
         index: Option<usize>,
         entry: ModelEntry,
     },
     Delete(usize),
     Close,
+}
+
+pub(super) enum StreamControl {
+    Continue,
+    Stop,
+    Command(String),
 }
 
 pub struct Screen {
@@ -459,7 +511,13 @@ pub struct Screen {
     usage: u32,
     reasoning: super::Reasoning,
     reasoning_details: bool,
-    suspended: bool,
+    background: Vec<u8>,
+    desktop_active: bool,
+    panel_frame: Option<PanelFrame>,
+    viewport: Option<Viewport>,
+    selection: Option<Selection>,
+    permission_mode: super::permissions::Mode,
+    approval_card: bool,
 }
 
 impl Screen {
@@ -489,7 +547,13 @@ impl Screen {
             usage: 0,
             reasoning: crate::native::Reasoning::Off,
             reasoning_details: false,
-            suspended: false,
+            background: Vec::new(),
+            desktop_active: false,
+            panel_frame: None,
+            viewport: None,
+            selection: None,
+            permission_mode: Default::default(),
+            approval_card: false,
         };
         if let Err(error) = enter() {
             let _ = terminal::disable_raw_mode();
@@ -512,6 +576,11 @@ impl Screen {
         self.reasoning = reasoning;
     }
 
+    #[cfg(windows)]
+    pub fn desktop_active(&mut self, active: bool) {
+        self.desktop_active = active;
+    }
+
     pub fn set_usage(&mut self, tokens: u32) {
         self.usage = tokens;
     }
@@ -532,40 +601,28 @@ impl Screen {
         self.overlay(title, lines)
     }
 
-    /// Leaves the alternate screen for a plain prompt (provider setup, task
-    /// confirmation, review) and keeps the session state for `resume`.
-    pub fn suspend(&mut self) -> Result<()> {
-        if self.suspended {
-            return Ok(());
-        }
-        execute!(
-            io::stdout(),
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            SetAttribute(Attribute::Reset),
-            ResetColor,
-            Show,
-            LeaveAlternateScreen
-        )?;
-        terminal::disable_raw_mode()?;
-        self.suspended = true;
-        Ok(())
-    }
-
-    pub fn resume(&mut self) -> Result<()> {
-        if !self.suspended {
-            return Ok(());
-        }
-        terminal::enable_raw_mode()?;
-        if let Err(error) = enter() {
-            let _ = terminal::disable_raw_mode();
-            return Err(error.into());
-        }
-        self.suspended = false;
+    pub fn reset_conversation(&mut self) {
+        self.permission_mode = Default::default();
+        self.stats = Stats::default();
+        self.turn = None;
+        self.started = Instant::now();
+        self.usage = 0;
+        self.notice.clear();
+        self.editor.clear();
+        self.queued.clear();
+        self.submit_queued = false;
+        self.submitted.clear();
+        self.nav = None;
+        self.scroll = 0;
+        self.selected = 0;
+        self.menu_closed = false;
+        self.armed = false;
         self.cache = None;
-        Ok(())
+        self.selection = None;
+        self.viewport = None;
+        self.panel_frame = None;
+        self.background.clear();
     }
-
     pub fn notice(&mut self, text: &str) {
         self.notice = render::sanitize(text);
     }
@@ -583,33 +640,56 @@ impl Screen {
     ) -> Result<Option<String>> {
         self.diagnose = diagnose;
         self.finish_turn();
-        if !self.queued.is_empty() {
-            let queued = std::mem::take(&mut self.queued);
-            self.editor = Editor::from(&queued);
-        }
-        if std::mem::take(&mut self.submit_queued) && !self.editor.text().trim().is_empty() {
-            let line = self.editor.text().trim().to_owned();
-            return Ok(Some(self.submit(&line)));
-        }
-        loop {
-            // Coalesce a burst of keystrokes into one frame instead of
-            // clearing and redrawing the whole screen for every character.
-            if !event::poll(Duration::ZERO)? {
-                self.draw(history, None, model, directory)?;
+        if std::mem::take(&mut self.submit_queued) {
+            let line = std::mem::take(&mut self.queued);
+            if line == "/status" {
+                self.status_panel(model, directory)?;
+            } else {
+                return Ok(Some(line));
             }
-            match event::read()? {
+        }
+        self.draw(history, None, model, directory)?;
+        let mut redraw = false;
+        loop {
+            if redraw && !event::poll(Duration::ZERO)? {
+                self.draw(history, None, model, directory)?;
+                redraw = false;
+            }
+            let event = event::read()?;
+            if ignored_event(&event) {
+                continue;
+            }
+            redraw = true;
+            match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
-                    let items = self.menu();
+                    let items = self.menu(directory);
                     let count = items.len();
                     let mut edited = false;
                     match key.code {
+                        KeyCode::F(6) => {
+                            self.permissions_menu()?;
+                        }
+                        KeyCode::Enter | KeyCode::Tab if count > 0 => {
+                            let name = &items[self.selected.min(count - 1)].0;
+                            if key.code == KeyCode::Tab && name.starts_with('/') {
+                                let prefix = self.editor.prefix();
+                                let token = prefix.split_whitespace().last().unwrap_or("");
+                                self.editor
+                                    .replace_tail(token.chars().count(), &format!("{name} "));
+                                self.menu_closed = true;
+                            } else if let Some(command) = self.complete(name) {
+                                if command == "/status" {
+                                    self.status_panel(model, directory)?;
+                                } else {
+                                    return Ok(Some(command));
+                                }
+                            }
+                            self.selected = 0;
+                            continue;
+                        }
                         KeyCode::Enter => {
-                            let line = if count > 0 {
-                                items[self.selected.min(count - 1)].0.to_owned()
-                            } else {
-                                self.editor.text().trim().to_owned()
-                            };
+                            let line = self.editor.text().trim().to_owned();
                             if line.is_empty() {
                                 continue;
                             }
@@ -620,15 +700,13 @@ impl Screen {
                             }
                             return Ok(Some(self.submit(&line)));
                         }
-                        KeyCode::Tab => {
-                            if count > 0 {
-                                let name = items[self.selected.min(count - 1)].0;
-                                self.editor = Editor::from(&format!("{name} "));
-                                self.menu_closed = true;
-                                edited = true;
-                            }
+                        KeyCode::F(8) if self.desktop_active => {
+                            return Ok(Some("/computer stop".into()));
                         }
                         KeyCode::Esc => {
+                            if self.selection.take().is_some() {
+                                continue;
+                            }
                             if count > 0 {
                                 self.menu_closed = true;
                             } else if !self.editor.is_empty() {
@@ -638,6 +716,9 @@ impl Screen {
                             self.armed = false;
                         }
                         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                            if self.copy_selection() {
+                                continue;
+                            }
                             if !self.editor.is_empty() {
                                 self.editor.clear();
                                 edited = true;
@@ -714,8 +795,14 @@ impl Screen {
                             self.editor.kill_word();
                             edited = true;
                         }
-                        KeyCode::F(2) => self.details = !self.details,
-                        KeyCode::F(3) => self.reasoning_details = !self.reasoning_details,
+                        KeyCode::F(2) => {
+                            self.selection = None;
+                            self.details = !self.details;
+                        }
+                        KeyCode::F(3) => {
+                            self.selection = None;
+                            self.reasoning_details = !self.reasoning_details;
+                        }
                         KeyCode::PageUp => self.scroll = self.scroll.saturating_add(10),
                         KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
                         KeyCode::Char(character) if text_key(key) && !character.is_control() => {
@@ -725,6 +812,7 @@ impl Screen {
                         _ => {}
                     }
                     if edited {
+                        self.selection = None;
                         self.selected = 0;
                         self.menu_closed = false;
                         self.armed = false;
@@ -733,17 +821,10 @@ impl Screen {
                         }
                     }
                 }
-                Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        self.scroll = self.scroll.saturating_add(5);
-                    }
-                    MouseEventKind::ScrollDown => {
-                        self.scroll = self.scroll.saturating_sub(5);
-                    }
-                    _ => {}
-                },
+                Event::Mouse(mouse) => self.chat_mouse(mouse),
                 Event::Paste(text) => {
-                    self.editor.insert(paste_text(&text).chars());
+                    self.selection = None;
+                    self.editor.paste(&text);
                     self.selected = 0;
                     self.menu_closed = false;
                     self.nav = None;
@@ -761,7 +842,7 @@ impl Screen {
         reasoning: &str,
         model: &str,
         directory: &Path,
-    ) -> Result<bool> {
+    ) -> Result<StreamControl> {
         self.track(output, reasoning);
         self.tick = self.tick.wrapping_add(1);
         self.draw(history, Some((output, reasoning)), model, directory)?;
@@ -769,58 +850,85 @@ impl Screen {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
+                    let items = self.menu(directory);
                     match key.code {
-                        KeyCode::Esc => return Ok(true),
-                        KeyCode::F(2) => self.details = !self.details,
-                        KeyCode::F(3) => self.reasoning_details = !self.reasoning_details,
+                        KeyCode::F(8) if self.desktop_active => {
+                            return Ok(StreamControl::Command("/computer stop".into()));
+                        }
+                        KeyCode::Esc => return Ok(StreamControl::Stop),
+                        KeyCode::F(6) => self.permissions_menu()?,
+                        KeyCode::F(2) => {
+                            self.selection = None;
+                            self.details = !self.details;
+                        }
+                        KeyCode::F(3) => {
+                            self.selection = None;
+                            self.reasoning_details = !self.reasoning_details;
+                        }
                         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                            return Ok(true);
-                        }
-                        KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                            self.scroll = self.scroll.saturating_add(5);
-                        }
-                        KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                            self.scroll = self.scroll.saturating_sub(5);
-                        }
-                        KeyCode::Enter => {
-                            if !self.queued.trim().is_empty() {
-                                self.submit_queued = true;
+                            if !self.copy_selection() {
+                                return Ok(StreamControl::Stop);
                             }
                         }
-                        KeyCode::Backspace => {
-                            self.queued.pop();
+                        KeyCode::Enter | KeyCode::Tab if !items.is_empty() => {
+                            if let Some(command) =
+                                self.complete(&items[self.selected.min(items.len() - 1)].0)
+                            {
+                                return Ok(StreamControl::Command(command));
+                            }
+                            self.selected = 0;
                         }
-                        KeyCode::Char(character)
-                            if text_key(key)
-                                && !character.is_control()
-                                && self.queued.len() < INPUT_LIMIT =>
+                        KeyCode::Enter if self.editor.text().trim_start().starts_with('/') => {
+                            let command = self.editor.text().trim().to_owned();
+                            self.editor.clear();
+                            return Ok(StreamControl::Command(command));
+                        }
+                        KeyCode::Up if !items.is_empty() && key.modifiers == KeyModifiers::NONE => {
+                            self.selected = (self.selected + items.len() - 1) % items.len()
+                        }
+                        KeyCode::Down
+                            if !items.is_empty() && key.modifiers == KeyModifiers::NONE =>
                         {
-                            self.queued.push(character);
+                            self.selected = (self.selected + 1) % items.len()
+                        }
+                        KeyCode::PageUp | KeyCode::Up => {
+                            self.scroll = self.scroll.saturating_add(5)
+                        }
+                        KeyCode::PageDown | KeyCode::Down => {
+                            self.scroll = self.scroll.saturating_sub(5)
+                        }
+                        KeyCode::Left => self.editor.left(),
+                        KeyCode::Right => self.editor.right(),
+                        KeyCode::Home => self.editor.home(),
+                        KeyCode::End => self.editor.end(),
+                        KeyCode::Backspace => {
+                            self.editor.backspace();
+                            self.selected = 0;
+                            self.menu_closed = false;
+                        }
+                        KeyCode::Delete => {
+                            self.editor.delete();
+                            self.selected = 0;
+                            self.menu_closed = false;
+                        }
+                        KeyCode::Char(character) if text_key(key) && !character.is_control() => {
+                            self.editor.insert([character]);
+                            self.selected = 0;
+                            self.menu_closed = false;
                         }
                         _ => {}
                     }
                 }
-                Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        self.scroll = self.scroll.saturating_add(5);
-                    }
-                    MouseEventKind::ScrollDown => {
-                        self.scroll = self.scroll.saturating_sub(5);
-                    }
-                    _ => {}
-                },
+                Event::Mouse(mouse) => self.chat_mouse(mouse),
                 Event::Paste(text) => {
-                    for character in paste_text(&text).chars() {
-                        if self.queued.len() >= INPUT_LIMIT {
-                            break;
-                        }
-                        self.queued.push(character);
-                    }
+                    self.editor.paste(&text);
+                    self.selected = 0;
+                    self.menu_closed = false;
                 }
                 _ => {}
             }
         }
-        Ok(false)
+        Ok(StreamControl::Continue)
     }
 
     fn submit(&mut self, line: &str) -> String {
@@ -857,7 +965,7 @@ impl Screen {
         });
     }
 
-    fn track(&mut self, output: &str, reasoning: &str) {
+    pub(super) fn track(&mut self, output: &str, reasoning: &str) {
         let Some(turn) = self.turn.as_mut() else {
             return;
         };
@@ -934,12 +1042,87 @@ impl Screen {
         });
     }
 
-    fn menu(&self) -> Vec<(&'static str, &'static str)> {
-        menu_items(&self.editor.text(), self.menu_closed, self.nav.is_some())
+    fn menu(&self, directory: &Path) -> Vec<(String, &'static str)> {
+        let prefix = self.editor.prefix();
+        if self.menu_closed || self.nav.is_some() {
+            return Vec::new();
+        }
+        if let Some(query) = super::attachment_prefix(&prefix) {
+            return super::attachment_choices(directory, query);
+        }
+        menu_items(&prefix, false, false)
+            .into_iter()
+            .map(|(name, description)| (name.to_owned(), description))
+            .collect()
+    }
+
+    fn complete(&mut self, item: &str) -> Option<String> {
+        let prefix = self.editor.prefix();
+        if item.starts_with('@') {
+            if let Some(query) = super::attachment_prefix(&prefix) {
+                self.editor.replace_tail(query.chars().count() + 1, item);
+                self.menu_closed = !item.ends_with('/');
+            }
+            return None;
+        }
+        let token = prefix.split_whitespace().last().unwrap_or("");
+        self.editor.replace_tail(token.chars().count(), "");
+        self.menu_closed = true;
+        Some(item.to_owned())
     }
 
     fn context(&self) -> u32 {
         self.cache.as_ref().map_or(0, |cache| estimate(cache.chars))
+    }
+
+    fn chat_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll = self.scroll.saturating_add(5),
+            MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_sub(5),
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection = self.viewport.as_ref().and_then(|view| view.begin(mouse));
+            }
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
+                if let (Some(view), Some(selection)) = (&self.viewport, &mut self.selection) {
+                    selection.extend(view, mouse);
+                    if matches!(mouse.kind, MouseEventKind::Drag(_)) {
+                        if usize::from(mouse.row) <= view.top {
+                            self.scroll = self.scroll.saturating_add(1);
+                        } else if usize::from(mouse.row)
+                            >= view.top + view.rows.len().saturating_sub(1)
+                        {
+                            self.scroll = self.scroll.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn copy_selection(&mut self) -> bool {
+        let (Some(view), Some(selection)) = (&self.viewport, &self.selection) else {
+            return false;
+        };
+        let cached = self
+            .cache
+            .as_ref()
+            .map_or(&[][..], |cache| cache.lines.as_slice());
+        let live = view
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, line)| (view.start + i, line))
+            .filter(|(row, _)| *row >= cached.len());
+        let Some(text) = selection.text(cached.iter().enumerate().chain(live)) else {
+            return false;
+        };
+        match selection::copy(&text) {
+            Ok(()) => self.notice(tr!("Скопировано.", "Copied.")),
+            Err(error) => self.notice(&error.to_string()),
+        }
+        self.armed = false;
+        true
     }
 
     fn draw(
@@ -952,7 +1135,9 @@ impl Screen {
         let (terminal_width, terminal_height) = terminal::size()?;
         let width = usize::from(terminal_width);
         let height = usize::from(terminal_height);
-        let mut out = io::stdout();
+        self.panel_frame = None;
+        self.viewport = None;
+        let mut out = Vec::new();
         queue!(
             out,
             BeginSynchronizedUpdate,
@@ -974,7 +1159,8 @@ impl Screen {
                 width,
             )?;
             queue!(out, EndSynchronizedUpdate)?;
-            out.flush()?;
+            io::stdout().lock().write_all(&out)?;
+            self.background = out;
             return Ok(());
         }
         let content = width.saturating_sub(4).clamp(40, MAX_CONTENT);
@@ -984,12 +1170,8 @@ impl Screen {
         self.header(&mut out, margin, content, model, directory, show_mark)?;
 
         let streaming = pending.is_some();
-        let menu = if streaming { Vec::new() } else { self.menu() };
-        let mut menu_rows = if streaming {
-            1
-        } else {
-            menu.len().clamp(1, MENU_LIMIT)
-        };
+        let menu = self.menu(directory);
+        let mut menu_rows = menu.len().clamp(1, MENU_LIMIT);
         menu_rows = menu_rows.min(height.saturating_sub(header_height + 7).max(1));
         let mut receipt_rows = usize::from(!streaming && self.stats.last.is_some());
         let mut notice_rows = usize::from(!self.notice.is_empty());
@@ -1078,22 +1260,39 @@ impl Screen {
             let end = total - scroll;
             let start = end.saturating_sub(conv_rows);
             if let Some(cache) = &self.cache {
-                for (index, line) in cache
-                    .lines
-                    .iter()
-                    .chain(pending_lines.iter())
-                    .enumerate()
-                    .skip(start)
-                    .take(conv_rows)
+                let viewport = Viewport {
+                    top: header_height,
+                    left: margin,
+                    width: content,
+                    start,
+                    rows: cache
+                        .lines
+                        .iter()
+                        .chain(pending_lines.iter())
+                        .skip(start)
+                        .take(conv_rows)
+                        .cloned()
+                        .collect(),
+                };
+                if self
+                    .selection
+                    .as_ref()
+                    .is_some_and(|range| range.width() != content)
                 {
-                    put_line(
-                        &mut out,
-                        margin,
-                        header_height + index - start,
-                        line,
-                        content,
-                    )?;
+                    self.selection = None;
                 }
+                for (row, line) in viewport.rows.iter().enumerate() {
+                    if let Some(highlight) = self
+                        .selection
+                        .as_ref()
+                        .and_then(|range| range.highlight(start + row, line))
+                    {
+                        put_line(&mut out, margin, header_height + row, &highlight, content)?;
+                    } else {
+                        put_line(&mut out, margin, header_height + row, line, content)?;
+                    }
+                }
+                self.viewport = Some(viewport);
             }
             if start > 0 {
                 let hint = Line::of(format!("↑ {start}"), Style::dim());
@@ -1129,17 +1328,7 @@ impl Screen {
         }
 
         let inner = content.saturating_sub(6);
-        let (text, caret) = if streaming {
-            (
-                render::sanitize(&self.queued)
-                    .chars()
-                    .take(inner)
-                    .collect::<String>(),
-                0,
-            )
-        } else {
-            self.editor.view(inner)
-        };
+        let (text, caret) = self.editor.view(inner);
         let border = Style::fg(render::LINE);
         let mut top = Line::new();
         top.push("╭", border);
@@ -1162,7 +1351,7 @@ impl Screen {
         foot.push("╯", border);
         put_line(&mut out, margin, box_top + 2, &foot, content)?;
 
-        if streaming {
+        if streaming && menu.is_empty() {
             put_line(
                 &mut out,
                 margin,
@@ -1219,20 +1408,17 @@ impl Screen {
             }
         }
 
-        if streaming {
-            queue!(out, Hide)?;
-        } else {
-            let column = margin + 4 + caret;
-            queue!(out, MoveTo(column as u16, (box_top + 1) as u16), Show)?;
-        }
+        let column = margin + 4 + caret;
+        queue!(out, MoveTo(column as u16, (box_top + 1) as u16), Show)?;
         queue!(out, EndSynchronizedUpdate)?;
-        out.flush()?;
+        io::stdout().lock().write_all(&out)?;
+        self.background = out;
         Ok(())
     }
 
     fn header(
         &self,
-        out: &mut io::Stdout,
+        out: &mut impl Write,
         margin: usize,
         content: usize,
         model: &str,
@@ -1240,10 +1426,17 @@ impl Screen {
         mark: bool,
     ) -> io::Result<()> {
         let path = render::tail(&crate::folders::display(directory), content);
-        let hint = tr!(
-            "/ команды · esc прервать · ctrl-c выйти",
-            "/ commands · esc to interrupt · ctrl-c to quit"
-        );
+        let hint = if self.desktop_active {
+            tr!(
+                "F8 · остановить управление окном",
+                "F8 · stop window control"
+            )
+        } else {
+            tr!(
+                "/ команды · esc прервать · ctrl-c выйти",
+                "/ commands · esc to interrupt · ctrl-c to quit"
+            )
+        };
         if !mark {
             put_line(out, margin, 0, &self.brand_line(), content)?;
             put_line(out, margin, 1, &self.model_line(model), content)?;
@@ -1521,47 +1714,15 @@ impl Screen {
     fn overlay(&mut self, title: &str, body: Vec<Line>) -> Result<()> {
         let mut scroll = 0usize;
         loop {
-            let (terminal_width, terminal_height) = terminal::size()?;
-            let width = usize::from(terminal_width);
-            let height = usize::from(terminal_height);
-            let panel_width = width.saturating_sub(8).clamp(36, 96).min(width);
-            let inner = panel_width.saturating_sub(4);
-            let panel_height = (body.len() + 2).min(height.saturating_sub(2)).max(4);
-            let visible = panel_height.saturating_sub(2);
-            scroll = scroll.min(body.len().saturating_sub(visible));
-            let left = width.saturating_sub(panel_width) / 2;
-            let top = height.saturating_sub(panel_height) / 2;
-            let mut out = io::stdout();
-            queue!(out, MoveTo(0, 0), Clear(ClearType::All), Hide)?;
-            let border = Style::fg(render::LINE);
-            let title_text = format!(" {title} ");
-            let mut first = Line::new();
-            first.push("╭─", border);
-            first.push(title_text.clone(), Style::brand().bold());
-            let used = 3 + title_text.as_str().width();
-            first.push("─".repeat(panel_width.saturating_sub(used + 1)), border);
-            first.push("╮", border);
-            put_line(&mut out, left, top, &first, panel_width)?;
-            for row in 0..visible {
-                let mut line = Line::new();
-                line.push("│ ", border);
-                if let Some(source) = body.get(scroll + row) {
-                    line.extend(source.truncate(inner));
-                }
-                line.pad_to(panel_width.saturating_sub(2), Style::plain());
-                line.push(" │", border);
-                put_line(&mut out, left, top + 1 + row, &line, panel_width)?;
-            }
-            let hint = tr!(" Esc / Enter — закрыть ", " Esc / Enter — close ");
-            let mut last = Line::new();
-            last.push("╰─", border);
-            last.push(hint, Style::dim());
-            let used = 3 + hint.width();
-            last.push("─".repeat(panel_width.saturating_sub(used + 1)), border);
-            last.push("╯", border);
-            put_line(&mut out, left, top + 1 + visible, &last, panel_width)?;
-            out.flush()?;
-            match event::read()? {
+            let panel = self.draw_panel(
+                title,
+                tr!("Esc / Enter — закрыть", "Esc / Enter — close"),
+                &body,
+                scroll,
+                None,
+            )?;
+            scroll = scroll.min(body.len().saturating_sub(panel.visible));
+            match read_ui_event()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
                     match key.code {
@@ -1594,9 +1755,18 @@ struct Panel {
     visible: usize,
 }
 
+struct PanelFrame {
+    size: (u16, u16),
+    left: usize,
+    top: usize,
+    width: usize,
+    rows: Vec<Line>,
+    cursor: Option<(usize, usize)>,
+}
+
 impl Screen {
     fn draw_panel(
-        &self,
+        &mut self,
         title: &str,
         footer: &str,
         body: &[Line],
@@ -1612,21 +1782,41 @@ impl Screen {
         let visible = panel_height.saturating_sub(2);
         let scroll = scroll.min(body.len().saturating_sub(visible));
         let left = width.saturating_sub(panel_width) / 2;
-        let top = height.saturating_sub(panel_height) / 2;
-        let mut out = io::stdout();
-        queue!(out, MoveTo(0, 0), Clear(ClearType::All), Hide)?;
-        let border = Style::fg(render::LINE);
-        let title_text = format!(" {title} ");
-        let mut first = Line::new();
-        first.push("╭─", border);
-        first.push(title_text.clone(), Style::brand().bold());
-        let used = 3 + title_text.as_str().width();
-        first.push("─".repeat(panel_width.saturating_sub(used + 1)), border);
-        first.push("╮", border);
-        put_line(&mut out, left, top, &first, panel_width)?;
+        let top = if self.approval_card {
+            height.saturating_sub(panel_height + 4)
+        } else {
+            height.saturating_sub(panel_height) / 2
+        };
+        let border = Style::fg(if self.approval_card {
+            render::WARN
+        } else {
+            render::LINE
+        });
+        let edge = |left: &str, right: &str, text: &str, style: Style| {
+            let mut line = Line::of(left, border);
+            let limit = panel_width.saturating_sub(3);
+            let mut label = Line::of(format!(" {text} "), style);
+            if label.width() > limit && limit > 0 {
+                label = label.truncate(limit - 1);
+                label.push("…", style);
+            }
+            line.extend(label);
+            let tail = panel_width.saturating_sub(line.width() + 1);
+            if tail > 0 {
+                line.push("─".repeat(tail), border);
+            }
+            line.push(right, border);
+            line
+        };
+        let mut rows = Vec::with_capacity(visible + 2);
+        let title_style = if self.approval_card {
+            border.bold()
+        } else {
+            Style::brand().bold()
+        };
+        rows.push(edge("╭─", "╮", title, title_style));
         for row in 0..visible {
-            let mut line = Line::new();
-            line.push("│ ", border);
+            let mut line = Line::of("│ ", border);
             if let Some(source) = body.get(scroll + row) {
                 if source.width() > inner && inner > 1 {
                     line.extend(source.truncate(inner - 1));
@@ -1637,41 +1827,60 @@ impl Screen {
             }
             line.pad_to(panel_width.saturating_sub(2), Style::plain());
             line.push(" │", border);
-            put_line(&mut out, left, top + 1 + row, &line, panel_width)?;
+            rows.push(line);
         }
-        let footer_limit = panel_width.saturating_sub(7);
-        let footer: String = if footer.chars().count() > footer_limit {
-            let mut text: String = footer
-                .chars()
-                .take(footer_limit.saturating_sub(1))
-                .collect();
-            text.push('…');
-            text
-        } else {
-            footer.to_owned()
-        };
-        let hint = format!(" {footer} ");
-        let mut last = Line::new();
-        last.push("╰─", border);
-        last.push(hint.clone(), Style::dim());
-        let used = 3 + hint.as_str().width();
-        last.push("─".repeat(panel_width.saturating_sub(used + 1)), border);
-        last.push("╯", border);
-        put_line(&mut out, left, top + 1 + visible, &last, panel_width)?;
-        if let Some((row, column)) = cursor {
-            let row = row.saturating_sub(scroll);
-            if row < visible {
-                queue!(
-                    out,
-                    MoveTo(
-                        (left + 2 + column.min(inner.saturating_sub(1))) as u16,
-                        (top + 1 + row) as u16
-                    ),
-                    Show
-                )?;
+        rows.push(edge("╰─", "╯", footer.trim(), Style::dim()));
+        let cursor = cursor.and_then(|(row, column)| {
+            let row = row.checked_sub(scroll)?;
+            (row < visible).then_some((
+                left + 2 + column.min(inner.saturating_sub(1)),
+                top + 1 + row,
+            ))
+        });
+        let size = (terminal_width, terminal_height);
+        let previous = self.panel_frame.as_ref().filter(|previous| {
+            previous.size == size
+                && previous.left == left
+                && previous.top == top
+                && previous.width == panel_width
+                && previous.rows.len() == rows.len()
+        });
+        let changed = |row: usize| previous.is_none_or(|frame| frame.rows[row] != rows[row]);
+        if (0..rows.len()).any(changed) || previous.is_none_or(|frame| frame.cursor != cursor) {
+            let mut out = io::BufWriter::new(io::stdout().lock());
+            queue!(out, BeginSynchronizedUpdate)?;
+            if previous.is_none() {
+                if self.background.is_empty()
+                    || self
+                        .panel_frame
+                        .as_ref()
+                        .is_some_and(|frame| frame.size != size)
+                {
+                    queue!(out, MoveTo(0, 0), Clear(ClearType::All))?;
+                } else {
+                    out.write_all(&self.background)?;
+                    queue!(out, BeginSynchronizedUpdate)?;
+                }
             }
+            for (row, line) in rows.iter().enumerate().filter(|(row, _)| changed(*row)) {
+                put_line(&mut out, left, top + row, line, panel_width)?;
+            }
+            if let Some((x, y)) = cursor {
+                queue!(out, MoveTo(x as u16, y as u16), Show)?;
+            } else {
+                queue!(out, Hide)?;
+            }
+            queue!(out, EndSynchronizedUpdate)?;
+            out.flush()?;
+            self.panel_frame = Some(PanelFrame {
+                size,
+                left,
+                top,
+                width: panel_width,
+                rows,
+                cursor,
+            });
         }
-        out.flush()?;
         Ok(Panel { visible })
     }
 
@@ -1705,7 +1914,7 @@ impl Screen {
                 0,
                 None,
             )?;
-            match event::read()? {
+            match read_ui_event()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
                     match key.code {
@@ -1740,10 +1949,11 @@ enum Field {
     Reasoning,
     ReasoningApi,
     ChatOnly,
+    Vision,
 }
 
 impl Field {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::Name,
         Self::Protocol,
         Self::Url,
@@ -1755,6 +1965,7 @@ impl Field {
         Self::Reasoning,
         Self::ReasoningApi,
         Self::ChatOnly,
+        Self::Vision,
     ];
 }
 
@@ -1768,8 +1979,11 @@ struct ModelForm {
     input: Editor,
     output: Editor,
     anthropic: bool,
+    responses: bool,
+    vision: bool,
     chat_only: bool,
-    key_set: bool,
+    key_url: Option<String>,
+    key_source: Option<usize>,
     reasoning: super::Reasoning,
     reasoning_api: super::ReasoningApi,
     focus: usize,
@@ -1784,7 +1998,7 @@ impl ModelForm {
             name: field(entry.map(|entry| entry.name.as_str()).unwrap_or("")),
             url: field(entry.map(|entry| entry.url.as_str()).unwrap_or("")),
             model: field(entry.map(|entry| entry.model.as_str()).unwrap_or("")),
-            key: Editor::new(),
+            key: field(entry.and_then(|entry| entry.key.as_deref()).unwrap_or("")),
             context: field(
                 &entry
                     .map(|entry| entry.context.max(1_000).to_string())
@@ -1801,8 +2015,13 @@ impl ModelForm {
                     .unwrap_or_else(|| 4096.to_string()),
             ),
             anthropic: entry.map(|entry| entry.anthropic).unwrap_or(false),
+            responses: entry.is_some_and(|entry| entry.responses),
+            vision: entry.is_some_and(|entry| entry.vision),
             chat_only: entry.map(|entry| entry.chat_only).unwrap_or(false),
-            key_set: entry.map(|entry| entry.key_set).unwrap_or(false),
+            key_url: entry
+                .filter(|entry| entry.key_set)
+                .map(|entry| entry.url.clone()),
+            key_source: entry.and_then(|entry| entry.key_source),
             reasoning: entry
                 .map(|entry| entry.reasoning)
                 .unwrap_or(super::Reasoning::Off),
@@ -1812,6 +2031,20 @@ impl ModelForm {
             focus: 0,
             error: None,
         }
+    }
+
+    fn saved_key_matches(&self) -> bool {
+        self.key_url
+            .as_deref()
+            .is_some_and(|url| self.url.text().trim().trim_end_matches('/') == url)
+    }
+
+    fn cycle_protocol(&mut self) {
+        (self.anthropic, self.responses) = match (self.anthropic, self.responses) {
+            (false, false) => (true, false),
+            (true, _) => (false, true),
+            _ => (false, false),
+        };
     }
 
     fn field(&self) -> Field {
@@ -1831,6 +2064,7 @@ impl ModelForm {
             Field::Reasoning => 9,
             Field::ReasoningApi => 10,
             Field::ChatOnly => 11,
+            Field::Vision => 12,
         }
     }
 
@@ -1843,7 +2077,11 @@ impl ModelForm {
             Field::Context => Some(&mut self.context),
             Field::Input => Some(&mut self.input),
             Field::Output => Some(&mut self.output),
-            Field::Protocol | Field::Reasoning | Field::ReasoningApi | Field::ChatOnly => None,
+            Field::Protocol
+            | Field::Reasoning
+            | Field::ReasoningApi
+            | Field::ChatOnly
+            | Field::Vision => None,
         }
     }
 
@@ -1853,8 +2091,11 @@ impl ModelForm {
     }
 
     fn entry(&self) -> std::result::Result<ModelEntry, String> {
+        self.build_entry(false)
+    }
+    fn build_entry(&self, allow_empty_model: bool) -> std::result::Result<ModelEntry, String> {
         let name = self.name.text().trim().to_owned();
-        if name.is_empty() {
+        if name.is_empty() && !allow_empty_model {
             return Err(
                 tr!("Название не может быть пустым", "The name cannot be empty").to_owned(),
             );
@@ -1868,7 +2109,7 @@ impl ModelForm {
         }
         let url = super::endpoint(self.url.text().trim()).map_err(|error| error.to_string())?;
         let model = self.model.text().trim().to_owned();
-        if model.is_empty() {
+        if model.is_empty() && !allow_empty_model {
             return Err(tr!("Укажи ID модели", "Enter the model ID").to_owned());
         }
         if model.chars().count() > 160 {
@@ -1918,7 +2159,12 @@ impl ModelForm {
         }
         if self.anthropic
             && self.reasoning != super::Reasoning::Off
-            && self.reasoning_api != super::ReasoningApi::None
+            && !matches!(
+                self.reasoning_api,
+                super::ReasoningApi::None
+                    | super::ReasoningApi::Adaptive
+                    | super::ReasoningApi::DeepSeek
+            )
             && let Some(budget) = self.reasoning.budget()
             && output <= budget
         {
@@ -1935,8 +2181,11 @@ impl ModelForm {
             url,
             model,
             key: (!key.is_empty()).then_some(key),
-            key_set: self.key_set || !self.key.is_empty(),
+            key_set: self.saved_key_matches() || !self.key.is_empty(),
+            key_source: self.key_source,
             anthropic: self.anthropic,
+            responses: self.responses,
+            vision: self.vision,
             chat_only: self.chat_only,
             context,
             input,
@@ -1999,6 +2248,8 @@ impl ModelForm {
         let mut protocol = label(Field::Protocol, tr!("Протокол", "Protocol"));
         let name = if self.anthropic {
             "Anthropic Messages"
+        } else if self.responses {
+            "OpenAI Responses"
         } else {
             tr!("OpenAI-совместимый", "OpenAI-compatible")
         };
@@ -2034,7 +2285,7 @@ impl ModelForm {
         if focused == Field::Key {
             let (shown, caret) = self.key.view(value_width);
             if shown.is_empty() {
-                if self.key_set {
+                if self.saved_key_matches() {
                     key.push(
                         tr!(
                             "(сохранён — введи новый, чтобы заменить)",
@@ -2058,7 +2309,7 @@ impl ModelForm {
                 );
             }
             cursor = Some((lines.len(), label_width + caret));
-        } else if self.key_set {
+        } else if self.saved_key_matches() {
             key.push(tr!("сохранён ••••", "saved ••••"), Style::dim());
         } else if self.key.is_empty() {
             key.push(tr!("не задан", "not set"), Style::dim());
@@ -2136,6 +2387,22 @@ impl ModelForm {
             chat.push("   Space", Style::dim());
         }
         lines.push(chat.truncate(inner));
+        let mut vision = label(Field::Vision, tr!("Изображения", "Images"));
+        vision.push(
+            if self.vision {
+                tr!("вкл", "on")
+            } else {
+                tr!("выкл", "off")
+            },
+            Style::fg(render::FG),
+        );
+        if focused == Field::Vision {
+            vision.push(
+                tr!("  · Пробел — сменить", "  · Space to toggle"),
+                Style::dim(),
+            );
+        }
+        lines.push(vision.truncate(inner));
         lines.push(Line::new());
         if let Some(error) = &self.error {
             lines.push(Line::of(format!("! {error}"), Style::fg(render::WARN)).truncate(inner));
@@ -2169,8 +2436,8 @@ fn model_lines(
         ));
         lines.push(Line::of(
             tr!(
-                "  Нажми a, чтобы добавить первую.",
-                "  Press a to add the first one."
+                "  A — добавить модель или открыть каталог F4 в форме.",
+                "  A adds a model; open the catalog with F4 in the form."
             ),
             Style::dim(),
         ));
@@ -2253,14 +2520,7 @@ fn model_lines(
 impl Screen {
     /// Full-screen "please wait" line used before slow MCP startup.
     pub fn busy(&mut self, text: &str) -> Result<()> {
-        let (terminal_width, terminal_height) = terminal::size()?;
-        let width = usize::from(terminal_width);
-        let height = usize::from(terminal_height);
-        let mut out = io::stdout();
-        queue!(out, MoveTo(0, 0), Clear(ClearType::All), Hide)?;
-        let line = Line::of(text, Style::brand());
-        put_line(&mut out, 2, height / 2, &line, width.saturating_sub(4))?;
-        out.flush()?;
+        self.draw_panel(text, "", &[Line::new()], 0, None)?;
         Ok(())
     }
 
@@ -2271,6 +2531,9 @@ impl Screen {
             super::Reasoning::Low,
             super::Reasoning::Medium,
             super::Reasoning::High,
+            super::Reasoning::Xhigh,
+            super::Reasoning::Max,
+            super::Reasoning::Ultra,
         ];
         let mut selected = levels
             .iter()
@@ -2303,7 +2566,12 @@ impl Screen {
                 if let Some(budget) = level.budget() {
                     row.push(format!("  · budget {budget}"), Style::dim());
                 } else {
-                    row.push(tr!("  · не отправлять", "  · do not send"), Style::dim());
+                    if *level == super::Reasoning::Off {
+                        row.push(
+                            tr!("  · по умолчанию провайдера", "  · provider default"),
+                            Style::dim(),
+                        );
+                    }
                 }
                 body.push(row);
             }
@@ -2325,7 +2593,7 @@ impl Screen {
                 0,
                 None,
             )?;
-            match event::read()? {
+            match read_ui_event()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
                     match key.code {
@@ -2348,9 +2616,14 @@ impl Screen {
 
     /// The `/model` screen: list, connect, add, edit and delete saved model
     /// connections without leaving the alternate screen.
-    pub fn models(&mut self, entries: &[ModelEntry], active: Option<usize>) -> Result<ModelAction> {
+    pub fn models(
+        &mut self,
+        entries: &[ModelEntry],
+        active: Option<usize>,
+        draft: Option<(Option<usize>, ModelEntry)>,
+    ) -> Result<ModelAction> {
         let mut selected = active.unwrap_or(0).min(entries.len().saturating_sub(1));
-        let mut form: Option<ModelForm> = None;
+        let mut form = draft.map(|(index, entry)| ModelForm::new(index, Some(&entry)));
         let mut error: Option<String> = None;
         let mut form_scroll = 0usize;
         loop {
@@ -2371,11 +2644,14 @@ impl Screen {
                     },
                     if term_width >= 72 {
                         tr!(
-                            " Tab/↑↓ — поле · Space/←→ — тумблер · Enter — сохранить · Esc — отмена ",
-                            " Tab/↑↓ — field · Space/←→ — toggle · Enter — save · Esc — cancel "
+                            " Tab/↑↓ — поле · Space/←→ — тумблер · F4 каталог · F5 авто · Enter сохранить · Esc ",
+                            " Tab/↑↓ — field · Space/←→ — toggle · F4 catalog · F5 auto · Enter save · Esc "
                         )
                     } else {
-                        tr!(" Tab · Enter — ок · Esc ", " Tab · Enter — ok · Esc ")
+                        tr!(
+                            " Tab · F4 · F5 · Enter · Esc ",
+                            " Tab · F4 · F5 · Enter · Esc "
+                        )
                     },
                     lines,
                     cursor,
@@ -2385,14 +2661,11 @@ impl Screen {
                     tr!("Модели", "Models"),
                     if term_width >= 72 {
                         tr!(
-                            " ↑↓ · Enter подключить · t тест · a/e/d · Esc ",
-                            " ↑↓ · Enter connect · t test · a/e/d · Esc "
+                            " E изменить · D удалить · Enter выбрать · A добавить · N копия · T тест · F5 авто ",
+                            " E edit · D delete · Enter select · A add · N copy · T test · F5 setup "
                         )
                     } else {
-                        tr!(
-                            " ↑↓ · Enter · t · a/e/d · Esc ",
-                            " ↑↓ · Enter · t · a/e/d · Esc "
-                        )
+                        tr!(" E изменить · D удалить ", " E edit · D delete ")
                     },
                     model_lines(entries, selected, active, error.as_deref()),
                     None,
@@ -2410,10 +2683,17 @@ impl Screen {
                 }
                 form_scroll = form_scroll.min(body.len().saturating_sub(visible));
             } else {
-                form_scroll = 0;
+                let visible = usize::from(terminal::size()?.1).saturating_sub(4);
+                let list_top = selected.saturating_mul(3);
+                if list_top < form_scroll {
+                    form_scroll = list_top;
+                } else if list_top + 1 >= form_scroll.saturating_add(visible) {
+                    form_scroll = (list_top + 2).saturating_sub(visible);
+                }
+                form_scroll = form_scroll.min(body.len().saturating_sub(visible));
             }
             self.draw_panel(title, footer, &body, form_scroll, cursor)?;
-            match event::read()? {
+            match read_ui_event()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
                     let mut cancel = false;
@@ -2425,6 +2705,24 @@ impl Screen {
                             }
                             KeyCode::Tab | KeyCode::Down => form.move_focus(1),
                             KeyCode::BackTab | KeyCode::Up => form.move_focus(-1),
+                            KeyCode::F(4) => match form.build_entry(true) {
+                                Ok(entry) => {
+                                    return Ok(ModelAction::Catalog {
+                                        index: form.index,
+                                        entry,
+                                    });
+                                }
+                                Err(message) => form.error = Some(message),
+                            },
+                            KeyCode::F(5) => match form.entry() {
+                                Ok(entry) => {
+                                    return Ok(ModelAction::Auto {
+                                        index: form.index,
+                                        entry,
+                                    });
+                                }
+                                Err(message) => form.error = Some(message),
+                            },
                             KeyCode::Enter => match form.entry() {
                                 Ok(entry) => {
                                     return Ok(ModelAction::Save {
@@ -2435,7 +2733,7 @@ impl Screen {
                                 Err(message) => form.error = Some(message),
                             },
                             KeyCode::Left => match form.field() {
-                                Field::Protocol => form.anthropic = !form.anthropic,
+                                Field::Protocol => form.cycle_protocol(),
                                 Field::Reasoning => form.reasoning = form.reasoning.next(),
                                 Field::ReasoningApi => {
                                     form.reasoning_api = form.reasoning_api.next()
@@ -2447,7 +2745,7 @@ impl Screen {
                                 }
                             },
                             KeyCode::Right => match form.field() {
-                                Field::Protocol => form.anthropic = !form.anthropic,
+                                Field::Protocol => form.cycle_protocol(),
                                 Field::Reasoning => form.reasoning = form.reasoning.next(),
                                 Field::ReasoningApi => {
                                     form.reasoning_api = form.reasoning_api.next()
@@ -2458,6 +2756,9 @@ impl Screen {
                                     }
                                 }
                             },
+                            KeyCode::Char(' ') if form.field() == Field::Vision => {
+                                form.vision = !form.vision
+                            }
                             KeyCode::Char(' ') if form.field() == Field::ChatOnly => {
                                 form.chat_only = !form.chat_only;
                             }
@@ -2528,8 +2829,17 @@ impl Screen {
                             KeyCode::Enter if !entries.is_empty() => {
                                 return Ok(ModelAction::Activate(selected));
                             }
-                            KeyCode::Char('t') | KeyCode::Char('т') if !entries.is_empty() => {
+                            KeyCode::F(5) if !entries.is_empty() => {
+                                return Ok(ModelAction::Auto {
+                                    index: Some(selected),
+                                    entry: entries[selected].clone(),
+                                });
+                            }
+                            KeyCode::Char('t') if !entries.is_empty() => {
                                 return Ok(ModelAction::Test(selected));
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('т') if !entries.is_empty() => {
+                                return Ok(ModelAction::Duplicate(selected));
                             }
                             KeyCode::Char('a') | KeyCode::Char('а') | KeyCode::Char('ф') => {
                                 error = None;
@@ -2615,7 +2925,267 @@ pub enum McpAction {
 
 impl Screen {
     /// Scrollable preview used by `/init`: Enter accepts, Esc declines.
+    pub fn stage_input(&mut self, input: String) {
+        self.queued = input;
+        self.submit_queued = true;
+    }
+
+    pub fn ask_text(&mut self, title: &str, secret: bool) -> Result<Option<String>> {
+        let mut input = String::new();
+        loop {
+            let mut line = Line::new();
+            let shown = if secret {
+                "•".repeat(input.chars().count())
+            } else {
+                input.clone()
+            };
+            let shown_width = shown.width();
+            line.push(shown, Style::fg(render::FG));
+            self.draw_panel(
+                title,
+                tr!(
+                    " Enter — принять · Esc — назад ",
+                    " Enter accept · Esc back "
+                ),
+                &[line],
+                0,
+                Some((0, shown_width)),
+            )?;
+            match read_ui_event()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
+                    KeyCode::Esc => return Ok(None),
+                    KeyCode::Enter if !input.trim().is_empty() => return Ok(Some(input)),
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Char(c)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !c.is_control()
+                            && input.len() < 2048 =>
+                    {
+                        input.push(c)
+                    }
+                    _ => {}
+                },
+                Event::Paste(text) => {
+                    input.extend(
+                        text.chars()
+                            .filter(|c| !c.is_control())
+                            .take(2048usize.saturating_sub(input.len())),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub fn choose(&mut self, title: &str, options: &[String]) -> Result<Option<usize>> {
+        if options.is_empty() {
+            return Ok(None);
+        }
+        let mut selected = options
+            .iter()
+            .position(|option| option.starts_with('●'))
+            .unwrap_or(0);
+        loop {
+            let lines: Vec<_> = options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| {
+                    let mut row = Line::new();
+                    if index == selected {
+                        row.push(" › ", Style::brand().bold());
+                    } else {
+                        row.push("   ", Style::plain());
+                    }
+                    row.push(option, Style::fg(render::FG));
+                    row
+                })
+                .collect();
+            let visible = usize::from(terminal::size()?.1).saturating_sub(5).max(1);
+            let scroll = selected.saturating_add(1).saturating_sub(visible);
+            self.draw_panel(
+                title,
+                tr!(
+                    " ↑↓ — выбор · Enter — открыть · Esc — назад ",
+                    " ↑↓ select · Enter open · Esc back "
+                ),
+                &lines,
+                scroll,
+                None,
+            )?;
+            if let Event::Key(key) = read_ui_event()?
+                && key.kind != KeyEventKind::Release
+            {
+                match key.code {
+                    KeyCode::Up => selected = selected.saturating_sub(1),
+                    KeyCode::Down => selected = (selected + 1).min(options.len() - 1),
+                    KeyCode::Enter => return Ok(Some(selected)),
+                    KeyCode::Esc => return Ok(None),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    pub fn tool_background(
+        &mut self,
+        history: &[Message],
+        model: &str,
+        directory: &Path,
+    ) -> Result<()> {
+        self.draw(history, None, model, directory)
+    }
+
+    pub fn wait_for_tool<T>(
+        &mut self,
+        label: &str,
+        cancel: &std::sync::atomic::AtomicBool,
+        worker: std::thread::ScopedJoinHandle<'_, T>,
+    ) -> Result<T> {
+        let message = trf!(
+            "{} · F6 — разрешения · Esc — остановить",
+            "{} · F6 permissions · Esc to stop",
+            label
+        );
+        self.busy(&message)?;
+        while !worker.is_finished() {
+            if self.poll_tool_stop(&message)? {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("Tool worker stopped"))
+    }
+
+    pub(super) fn wait_for_web<T: Send + 'static>(
+        &mut self,
+        label: &str,
+        task: impl FnOnce(&std::sync::atomic::AtomicBool) -> Result<T> + Send + 'static,
+    ) -> Result<Option<Result<T>>> {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let message = trf!(
+            "{} · F6 — разрешения · Esc — отменить",
+            "{} · F6 permissions · Esc to cancel",
+            label
+        );
+        self.busy(&message)?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let worker = std::thread::spawn(move || task(&worker_cancel));
+        let started = Instant::now();
+        while !worker.is_finished() {
+            let stop = self.poll_tool_stop(&message);
+            if !matches!(stop, Ok(false)) {
+                cancel.store(true, Ordering::Relaxed);
+                return stop.map(|_| None);
+            }
+            if started.elapsed() >= super::web::TIMEOUT && !worker.is_finished() {
+                cancel.store(true, Ordering::Relaxed);
+                return Ok(Some(Err(anyhow::anyhow!(tr!(
+                    "Веб-запрос занял слишком много времени. Проверь соединение и настройку /search.",
+                    "The web request timed out. Check your connection and /search settings."
+                )))));
+            }
+        }
+        Ok(Some(worker.join().unwrap_or_else(|_| {
+            Err(anyhow::anyhow!("Web worker stopped"))
+        })))
+    }
+
+    fn poll_tool_stop(&mut self, message: &str) -> Result<bool> {
+        if !event::poll(Duration::from_millis(55))? {
+            return Ok(false);
+        }
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let key = normalize_key(key);
+                if key.code == KeyCode::F(6) {
+                    self.permissions_menu()?;
+                    self.busy(message)?;
+                }
+                return Ok(key.code == KeyCode::Esc
+                    || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL));
+            }
+            Event::Resize(_, _) => self.busy(message)?,
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    pub fn permission_mode(&self) -> super::permissions::Mode {
+        self.permission_mode
+    }
+
+    pub fn permissions_menu(&mut self) -> Result<()> {
+        use super::permissions::Mode;
+        let modes = Mode::ALL;
+        let choices = modes.map(|mode| {
+            format!(
+                "{} {}",
+                if mode == self.permission_mode {
+                    "●"
+                } else {
+                    " "
+                },
+                mode.label()
+            )
+        });
+        let was_approval = std::mem::replace(&mut self.approval_card, true);
+        let selected = self.choose(tr!("Разрешения · F6", "Permissions · F6"), &choices);
+        let selection = selected.and_then(|index| {
+            if let Some(index) = index {
+                let mode = modes[index];
+                if mode != Mode::Full
+                    || self.review_card(mode.label(), mode.description(), false)?
+                {
+                    self.permission_mode = mode;
+                }
+            }
+            Ok(())
+        });
+        self.approval_card = was_approval;
+        selection?;
+        self.notice(self.permission_mode.label());
+        Ok(())
+    }
+
+    pub(super) fn request_permission(
+        &mut self,
+        mode: super::permissions::Mode,
+        reason: &str,
+    ) -> Result<bool> {
+        let detail = format!(
+            "{} → {}\n{}\n\n{}",
+            self.permission_mode.label(),
+            mode.label(),
+            mode.description(),
+            reason
+        );
+        if self.review(
+            tr!("Агент запрашивает разрешение", "Agent requests permission"),
+            &detail,
+        )? {
+            self.permission_mode = mode;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub fn review(&mut self, title: &str, text: &str) -> Result<bool> {
+        let was_approval = std::mem::replace(&mut self.approval_card, true);
+        let result = self.review_card(title, text, true);
+        self.approval_card = was_approval;
+        result
+    }
+
+    fn review_card(&mut self, title: &str, text: &str, permissions_shortcut: bool) -> Result<bool> {
         let (terminal_width, _) = terminal::size()?;
         let width = (usize::from(terminal_width).saturating_sub(8).clamp(36, 96)).saturating_sub(4);
         let mut lines = Vec::new();
@@ -2628,23 +3198,27 @@ impl Screen {
             line.push(paragraph, Style::fg(render::FG));
             lines.extend(render::wrap(&line, width));
         }
+        while event::poll(Duration::ZERO)? {
+            let _ = event::read()?;
+        }
         let mut scroll = 0usize;
         loop {
             let panel = self.draw_panel(
                 title,
                 tr!(
-                    " ↑↓ · PgUp/PgDn — прокрутка · Enter — создать · Esc — отмена ",
-                    " ↑↓ · PgUp/PgDn — scroll · Enter — create · Esc — cancel "
+                    " Enter — подтвердить · Esc — отмена · F6 — разрешения · ↑↓ — прокрутка ",
+                    " Enter confirm · Esc cancel · F6 permissions · ↑↓ scroll "
                 ),
                 &lines,
                 scroll,
                 None,
             )?;
-            match event::read()? {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
+            match read_ui_event()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     let key = normalize_key(key);
                     match key.code {
                         KeyCode::Enter => return Ok(true),
+                        KeyCode::F(6) if permissions_shortcut => self.permissions_menu()?,
                         KeyCode::Esc | KeyCode::Char('q') => return Ok(false),
                         KeyCode::Up => scroll = scroll.saturating_sub(1),
                         KeyCode::Down => scroll = scroll.saturating_add(1),
@@ -2730,7 +3304,7 @@ impl Screen {
                     preview_scroll,
                     None,
                 )?;
-                match event::read()? {
+                match read_ui_event()? {
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
                         let key = normalize_key(key);
                         match key.code {
@@ -2812,7 +3386,7 @@ impl Screen {
                 None,
             )?;
             scroll = scroll.min(lines.len().saturating_sub(panel.visible));
-            match event::read()? {
+            match read_ui_event()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
                     match key.code {
@@ -3039,7 +3613,7 @@ impl Screen {
                 }
             };
             self.draw_panel(title, footer, &body, scroll, None)?;
-            match event::read()? {
+            match read_ui_event()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
                     match mode {
@@ -3132,9 +3706,6 @@ impl Screen {
 
 impl Drop for Screen {
     fn drop(&mut self) {
-        if self.suspended {
-            return;
-        }
         let _ = execute!(
             io::stdout(),
             DisableMouseCapture,
@@ -3158,7 +3729,29 @@ fn enter() -> io::Result<()> {
     )
 }
 
-fn put_line(out: &mut io::Stdout, x: usize, y: usize, line: &Line, width: usize) -> io::Result<()> {
+fn ignored_event(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            ..
+        }) | Event::Key(KeyEvent {
+            kind: KeyEventKind::Release,
+            ..
+        })
+    )
+}
+
+fn read_ui_event() -> io::Result<Event> {
+    loop {
+        let event = event::read()?;
+        if !ignored_event(&event) {
+            return Ok(event);
+        }
+    }
+}
+
+fn put_line(out: &mut impl Write, x: usize, y: usize, line: &Line, width: usize) -> io::Result<()> {
     if width == 0 {
         return Ok(());
     }
@@ -3187,7 +3780,17 @@ fn put_line(out: &mut io::Stdout, x: usize, y: usize, line: &Line, width: usize)
     queue!(out, SetAttribute(Attribute::Reset), ResetColor)
 }
 
-fn apply_style(out: &mut io::Stdout, style: Style, current: &mut Style) -> io::Result<()> {
+fn apply_style(out: &mut impl Write, style: Style, current: &mut Style) -> io::Result<()> {
+    if style.reversed != current.reversed {
+        queue!(
+            out,
+            SetAttribute(if style.reversed {
+                Attribute::Reverse
+            } else {
+                Attribute::NoReverse
+            })
+        )?;
+    }
     if style.bold != current.bold {
         queue!(
             out,
@@ -3329,7 +3932,13 @@ fn history_lines(
 ) -> Vec<Line> {
     let mut lines = Vec::new();
     for message in history {
-        if message.role == "assistant" {
+        if matches!(
+            message.role.as_str(),
+            "assistant" | "narration" | "interrupted"
+        ) {
+            if message.role == "interrupted" {
+                lines.push(Line::of(tr!("  Остановлено", "  Stopped"), Style::dim()));
+            }
             if let Some(reasoning) = message.reasoning.as_deref() {
                 lines.extend(reasoning_lines(reasoning, width, reasoning_details, false));
             }
@@ -3337,6 +3946,29 @@ fn history_lines(
                 lines.push(action_line(&action));
             } else if !message.content.is_empty() {
                 lines.extend(render::assistant(&message.content, width));
+            }
+        } else if message.role == "event" {
+            for text in message.content.lines() {
+                let line = Line::of(format!("  {text}"), Style::dim());
+                if line.is_blank() {
+                    lines.push(line);
+                } else {
+                    lines.extend(render::wrap(&line, width));
+                }
+            }
+        } else if message.role == "permission" {
+            for line in message.content.lines() {
+                lines.extend(render::wrap(
+                    &Line::of(line, Style::fg(render::WARN).bold()),
+                    width,
+                ));
+            }
+        } else if message.role == "error" {
+            for text in message.content.lines() {
+                lines.extend(render::wrap(
+                    &Line::of(format!("  {text}"), Style::fg(render::WARN)),
+                    width,
+                ));
             }
         } else if message.content.starts_with("Tool result") {
             lines.extend(tool_lines(&message.content, width, details));
@@ -3458,6 +4090,13 @@ fn help_lines() -> Vec<Line> {
         ),
     ));
     lines.push(row(
+        "F6",
+        tr!(
+            "сменить разрешения во время работы",
+            "change permissions during a request"
+        ),
+    ));
+    lines.push(row(
         "PgUp/PgDn",
         tr!("прокрутить историю", "scroll history"),
     ));
@@ -3472,8 +4111,8 @@ fn help_lines() -> Vec<Line> {
     lines.push(row(
         "Ctrl-C",
         tr!(
-            "очистить ввод; дважды — выйти",
-            "clear the input; twice to exit"
+            "копировать выделенное мышью; иначе очистить ввод",
+            "copy mouse selection; otherwise clear the input"
         ),
     ));
     lines.push(row(
@@ -3489,7 +4128,7 @@ mod tests {
 
     #[test]
     fn the_menu_filters_commands_by_prefix() {
-        assert_eq!(menu_items("/", false, false).len(), 17);
+        assert_eq!(menu_items("/", false, false).len(), commands().len());
         let filtered = menu_items("/st", false, false);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0, "/status");
@@ -3497,6 +4136,7 @@ mod tests {
         assert!(menu_items("/", false, true).is_empty());
         assert!(menu_items("/help me", false, false).is_empty());
         assert!(menu_items("hello", false, false).is_empty());
+        assert_eq!(menu_items("draft /per", false, false)[0].0, "/permissions");
     }
 
     #[test]
@@ -3525,7 +4165,13 @@ mod tests {
             usage: 0,
             reasoning: crate::native::Reasoning::Off,
             reasoning_details: false,
-            suspended: true,
+            background: Vec::new(),
+            desktop_active: false,
+            panel_frame: None,
+            viewport: None,
+            selection: None,
+            permission_mode: crate::native::permissions::Mode::Ask,
+            approval_card: false,
         };
         screen.begin_turn("prompt");
         screen.track("первый ответ", "");
@@ -3538,6 +4184,15 @@ mod tests {
             estimate("первый ответ".chars().count()) + estimate("второй ответ".chars().count())
         );
         assert_eq!(screen.stats.turns, 1);
+        screen.stage_input("old draft".to_owned());
+        screen.set_usage(500);
+        screen.reset_conversation();
+        assert!(screen.permission_mode() == crate::native::permissions::Mode::Auto);
+        assert!(screen.stats.last.is_none());
+        assert_eq!(screen.stats.turns, 0);
+        assert_eq!(screen.usage, 0);
+        assert!(!screen.submit_queued);
+        assert!(screen.queued.is_empty());
     }
 
     #[test]
@@ -3625,8 +4280,8 @@ mod tests {
     }
 
     #[test]
-    fn pasted_newlines_become_spaces() {
-        assert_eq!(paste_text("a\r\nb\tc\x07"), "a b c");
+    fn pasted_newlines_stay_in_the_draft() {
+        assert_eq!(paste_text("a\r\nb\tc\x07"), "a\nb c");
     }
 
     #[test]

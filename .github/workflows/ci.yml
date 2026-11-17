@@ -134,4 +134,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" "${flags[@]}" \
             dist/flashgpt-usb-amd64.zip dist/SHA256SUMS \
             dist/carrycode-lite-amd64.zip dist/SHA256SUMS-lite \
-            dist/flashGPT-setup-windows-x64.exe dist/flashGPT-setup-windows-x64.exe.sha256
+            dist/CarryCode-Lite-Setup-Windows-x64.exe dist/CarryCode-Lite-Setup-Windows-x64.exe.sha256 \
+            dist/CarryCode-Full-Setup-Windows-x64.exe dist/CarryCode-Full-Setup-Windows-x64.exe.sha256

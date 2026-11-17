@@ -42,3 +42,5 @@ description: "Diagnose a failing build, test, command or runtime behavior in the
 ```
 
 If nothing is found, list what was checked and the next concrete probe.
+
+Use inspect_project to identify the relevant package. For a running web app, inspect the hidden browser snapshot and console before claiming a cause.

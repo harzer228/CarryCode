@@ -114,19 +114,7 @@ pub fn review(root: &Path) -> Result<()> {
     review_json(root, &input)
 }
 
-pub struct Undo {
-    proposal: Proposal,
-}
-impl Undo {
-    pub fn apply(self) -> Result<()> {
-        self.proposal.apply(true)?;
-        Ok(())
-    }
-}
-pub fn review_json(root: &Path, input: &str) -> Result<()> {
-    review_with_undo(root, input).map(|_| ())
-}
-pub fn review_with_undo(root: &Path, input: &str) -> Result<Option<Undo>> {
+fn review_json(root: &Path, input: &str) -> Result<()> {
     let request = parse_request(input)?;
     let proposal = Proposal::new(root, &request.path, &request.before, &request.after)?;
     println!(
@@ -150,14 +138,6 @@ pub fn review_with_undo(root: &Path, input: &str) -> Result<Option<Undo>> {
         "Введи {code}, чтобы применить замену, или Enter для отмены: ",
         "Type {code} to apply the replacement, or press Enter to cancel: "
     ))?;
-    let reverse = Proposal {
-        root: proposal.root.clone(),
-        relative: proposal.relative.clone(),
-        original: proposal.updated.clone(),
-        updated: proposal.original.clone(),
-        removed: proposal.added.clone(),
-        added: proposal.removed.clone(),
-    };
     if proposal.apply(answer.as_deref() == Some(code.as_str()))? {
         println!(
             "{}",
@@ -166,10 +146,10 @@ pub fn review_with_undo(root: &Path, input: &str) -> Result<Option<Undo>> {
                 "Replacement applied. Repeat the action that triggered the issue."
             )
         );
-        return Ok(Some(Undo { proposal: reverse }));
+        return Ok(());
     }
     println!("{}", tr!("Замена отменена.", "Replacement canceled."));
-    Ok(None)
+    Ok(())
 }
 
 fn parse_request(input: &str) -> Result<Request> {
@@ -271,7 +251,7 @@ fn target(root: &Path, relative: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn is_link(metadata: &Metadata) -> bool {
+pub(crate) fn is_link(metadata: &Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -304,7 +284,7 @@ fn read_text(path: &Path) -> Result<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn replace(path: &Path, draft: &Path, _stage: tempfile::TempDir) -> Result<()> {
+pub(crate) fn replace(path: &Path, draft: &Path, _stage: tempfile::TempDir) -> Result<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let metadata = fs::metadata(path)?;
     ensure!(
@@ -342,7 +322,7 @@ fn replace(path: &Path, draft: &Path, _stage: tempfile::TempDir) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn replace(path: &Path, draft: &Path, stage: tempfile::TempDir) -> Result<()> {
+pub(crate) fn replace(path: &Path, draft: &Path, stage: tempfile::TempDir) -> Result<()> {
     use std::ptr::null_mut;
     use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
     let backup = stage.path().join("original");

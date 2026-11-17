@@ -8,9 +8,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $repo 'dist'
-$zip = Join-Path $dist 'flashgpt-usb-amd64.zip'
-if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
-    throw 'Run xtask package first or put the matching release ZIP in dist/.'
+$packages = [ordered]@{
+    Lite = Join-Path $dist 'carrycode-lite-amd64.zip'
+    Full = Join-Path $dist 'flashgpt-usb-amd64.zip'
+}
+foreach ($zip in $packages.Values) {
+    if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
+        throw "Missing $zip. Run xtask package and package-lite first."
+    }
 }
 
 if (-not $Compiler) {
@@ -40,30 +45,44 @@ if (-not $Compiler) {
 $Compiler = (Get-Item -LiteralPath $Compiler).FullName
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$stage = Join-Path $dist ('installer-bundle-' + [Guid]::NewGuid().ToString('N'))
-try {
-    [IO.Compression.ZipFile]::ExtractToDirectory($zip, $stage)
-    $launcher = Join-Path $stage 'flashGPT.exe'
-    $info = & $launcher --version
-    if ($LASTEXITCODE -ne 0 -or $info.Trim() -ne "CarryCode $Version") {
-        throw "The bundled Windows launcher does not match version $Version."
-    }
-    foreach ($path in 'profile', 'flashgpt.json', 'flashgpt-settings.json') {
-        if (Test-Path -LiteralPath (Join-Path $stage $path)) {
-            throw "Unexpected profile data in the input ZIP: $path"
+foreach ($edition in $packages.Keys) {
+    $stage = Join-Path $dist ('installer-bundle-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        [IO.Compression.ZipFile]::ExtractToDirectory($packages[$edition], $stage)
+        $launcher = Join-Path $stage 'flashGPT.exe'
+        $info = & $launcher --version
+        if ($LASTEXITCODE -ne 0 -or $info.Trim() -ne "CarryCode $Version") {
+            throw "The bundled Windows launcher does not match version $Version."
         }
-    }
+        foreach ($path in 'profile', 'flashgpt.json', 'flashgpt-settings.json') {
+            if (Test-Path -LiteralPath (Join-Path $stage $path)) {
+                throw "Unexpected profile data in the input ZIP: $path"
+            }
+        }
+        if ($edition -eq 'Lite') {
+            if (Test-Path -LiteralPath (Join-Path $stage 'bin')) {
+                throw 'Unexpected CLI runtimes in the Lite ZIP.'
+            }
+        } else {
+            foreach ($path in 'bin/windows-amd64/codex/bin/codex.exe', 'bin/windows-amd64/opencode/opencode.exe',
+                'bin/linux-amd64/codex/bin/codex', 'bin/linux-amd64/opencode/opencode') {
+                if (-not (Test-Path -LiteralPath (Join-Path $stage $path) -PathType Leaf)) {
+                    throw "Missing CLI runtime in the Full ZIP: $path"
+                }
+            }
+        }
 
-    $script = Join-Path $PSScriptRoot 'flashgpt.iss'
-    & $Compiler /Qp "/DAppVersion=$Version" "/DBundleDir=$stage" "/O$dist" $script
-    if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler exited with code $LASTEXITCODE." }
-    $name = 'flashGPT-setup-windows-x64.exe'
-    $sha = (Get-FileHash -LiteralPath (Join-Path $dist $name)).Hash.ToLowerInvariant()
-    Set-Content -LiteralPath (Join-Path $dist "$name.sha256") -Encoding ascii -Value "$sha  $name"
-} finally {
-    $target = [IO.Path]::GetFullPath($stage)
-    if ($target.StartsWith([IO.Path]::GetFullPath($dist) + '\', [StringComparison]::OrdinalIgnoreCase) -and
-        (Test-Path -LiteralPath $target)) {
-        Remove-Item -LiteralPath $target -Recurse -Force
+        $script = Join-Path $PSScriptRoot 'flashgpt.iss'
+        & $Compiler /Qp "/DAppVersion=$Version" "/DBundleDir=$stage" "/DEdition=$edition" "/O$dist" $script
+        if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler exited with code $LASTEXITCODE." }
+        $name = "CarryCode-$edition-Setup-Windows-x64.exe"
+        $sha = (Get-FileHash -LiteralPath (Join-Path $dist $name)).Hash.ToLowerInvariant()
+        Set-Content -LiteralPath (Join-Path $dist "$name.sha256") -Encoding ascii -Value "$sha  $name"
+    } finally {
+        $target = [IO.Path]::GetFullPath($stage)
+        if ($target.StartsWith([IO.Path]::GetFullPath($dist) + '\', [StringComparison]::OrdinalIgnoreCase) -and
+            (Test-Path -LiteralPath $target)) {
+            Remove-Item -LiteralPath $target -Recurse -Force
+        }
     }
 }

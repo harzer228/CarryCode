@@ -50,3 +50,5 @@ Do not edit during a review unless the user asks to fix. When they do, propose
 exactly one `action: edit` per file with `path`, `reason`, `before`, `after`;
 the user reviews every replacement. Do not combine several files into one edit
 object.
+
+Use git_status and git_diff to establish scope and read the surrounding lines. Use a reviewed change group if the user asks to apply fixes.

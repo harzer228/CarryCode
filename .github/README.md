@@ -1,9 +1,9 @@
 <div align="center">
   <h1><img src="media/banner.png" alt="CarryCode. Fix problems. Code anywhere." width="100%"></h1>
   <p>
-    <a href="https://github.com/harzer228/flashGPT/releases/latest/download/flashGPT-setup-windows-x64.exe"><strong>Windows installer</strong></a>
-    · <a href="https://github.com/harzer228/flashGPT/releases/latest/download/flashgpt-usb-amd64.zip"><strong>Portable ZIP</strong></a>
-    · <a href="https://github.com/harzer228/flashGPT/releases/latest">Release notes and SHA-256</a>
+    <a href="https://github.com/harzer228/flashGPT/releases/download/v0.1.0-beta.6/CarryCode-Lite-Setup-Windows-x64.exe"><strong>Windows Lite</strong></a>
+    · <a href="https://github.com/harzer228/flashGPT/releases/download/v0.1.0-beta.6/CarryCode-Full-Setup-Windows-x64.exe"><strong>Windows Full</strong></a>
+    · <a href="https://github.com/harzer228/flashGPT/releases/tag/v0.1.0-beta.6">Portable ZIPs, release notes and SHA-256</a>
     · <a href="../README.md">На русском</a>
     · <a href="../CHANGELOG.md">Changelog</a>
   </p>
@@ -15,13 +15,11 @@
 
 ## Native agent preview
 
-The source tree includes an experimental Rust agent under menu **8 — CarryCode Agent (alpha)**. It supports custom OpenAI-compatible base URLs and Anthropic Messages, streamed chat, project text search, confirmed replacements in existing files, and confirmed Cargo/npm/unittest tasks. `/model` manages model connections in the terminal: protocol, base URL, model ID, masked API key, context window, input limit, output limit, reasoning level, reasoning API mode, and chat-only mode, plus add/edit/delete/connect and a **t** connection test. `/skills` lists Claude-format `SKILL.md` folders from the project, bundle, user profile and other agents; `/mcp` runs local stdio MCP servers, shows their tools and imports existing Claude Code, Codex and OpenCode configs with a confirmation for every call. `/init` previews and writes a project `AGENTS.md`. Conversations and provider settings use the encrypted USB profile. Use `/provider` for the plain-text provider prompt or `+` to add another named provider. Type `/help` for controls. Scroll the conversation with the mouse wheel, **PgUp/PgDn** or **Shift+Up/Down**; `/exit` or `/quit` returns to the launcher.
+The native agent can create projects, review groups of file changes, and run confirmed PowerShell or Bash commands. Open `/project` for Web, Python, and Rust starters. Use `/tools` for the current tool list.
 
-`/reasoning` selects off/low/medium/high for the active model and saves it in the profile, or use `/reasoning high` directly. OpenAI-compatible endpoints receive `reasoning_effort` (OpenRouter receives a `reasoning` object); Anthropic receives an extended-thinking budget. Reasoning streams live, is stored with the reply, collapsed to three lines by default and expanded with **F3**; **F2** still toggles tool results. It is not sent back as ordinary history and is counted in the reply token estimate. Signed Anthropic thinking blocks are not replayed because the agent uses a text JSON action protocol; API errors show the response body and `/reasoning off` disables the parameter. The model form rejects input + output combinations that exceed the context window, and the agent refuses an over-limit input before making a network request. Provider failures open a scrollable panel with the HTTP status and response body.
+`/browser` controls installed Chromium, Chrome, or Edge in the background. It exposes the page accessibility tree, console messages and screenshots. Enable **Images** in `/model` to let a vision model inspect a screenshot. On Windows, `/computer` selects a single application window. `/search` uses SearXNG or Brave Search without an approval prompt. The local preset verifies that SearXNG at `127.0.0.1:8080` accepts JSON search requests. Press **Esc** to cancel a pending search. New conversations start in **Approve for me** mode. **F6** changes permissions during a turn. Model settings take effect with the next user message.
 
-Agent commands: `/provider`, `/model`, `/reasoning`, `/skills`, `/mcp`, `/init`, `/sessions`, `/new`, `/temporary`, `/clear`, `/undo`, `/status`, `/diagnose`, `/code`, `/help`, `/quit` and `/exit`. Enter sends; Tab completes a slash command; Up/Down walks input history or menu items; Esc closes a menu, clears input or stops a reply (it does not leave the agent); F2 toggles tool results; F3 toggles reasoning; PgUp/PgDn, Shift+Up/Down and the mouse wheel scroll the reply; Ctrl-C twice or Ctrl-D exits.
-
-This preview has bounded file reading and context, and its coding quality has not yet been benchmarked against Codex or Claude Code. The release downloads above remain the published launcher release. [Preview instructions and limits](../README.md#carrycode-agent--экспериментальная-альфа)
+Open `/model` to save models and set context, token limits and reasoning for each one. **N** adds a second model with the selected connection. **F4** opens the provider catalog and **F5** checks reasoning with a short test request. Provider errors appear in the chat. Drag over a response and press **Ctrl+C** to copy the selection. [Agent instructions](../README.md#carrycode-agent--экспериментальная-альфа)
 
 ## Demo
 
@@ -36,7 +34,9 @@ Plug in the USB drive, open CarryCode, pick Codex or OpenCode, and choose the pr
 3. **Choose an agent and project folder.** Use the arrow keys and **Enter** to open folders, then select **Choose this folder** or press **F2**. Sign in through Codex or use `/connect` in OpenCode.
 4. **Move to another computer.** Exit the CLI, wait for the profile to save, and close the menu before ejecting. Run CarryCode from the same USB bundle and unlock it with the same password.
 
-On Windows, open PowerShell in the download folder and run `Get-FileHash -Algorithm SHA256 .\flashGPT-setup-windows-x64.exe`. Compare the result with `flashGPT-setup-windows-x64.exe.sha256` from the same release. On Linux, run `sha256sum -c SHA256SUMS` in the folder containing the ZIP and `SHA256SUMS`. The Windows installer is unsigned.
+**Lite** contains the launcher and CarryCode Agent. **Full** also bundles Codex CLI and OpenCode for Windows and Linux. Beta 6 may contain bugs.
+
+On Windows, open PowerShell in the download folder and run `Get-FileHash -Algorithm SHA256 .\CarryCode-Full-Setup-Windows-x64.exe`, or use the Lite filename. Compare the result with the matching `.exe.sha256` file from the same release. For ZIP downloads on Linux, run `sha256sum -c SHA256SUMS` for Full or `sha256sum -c SHA256SUMS-lite` for Lite. The Windows installers are unsigned.
 
 ## Supported systems
 

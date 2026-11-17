@@ -101,3 +101,5 @@ CarryCode.
 Then open `/skills` in CarryCode: the skill must appear with its description and
 source. Ask the agent to use it and confirm that it loads the body instead of
 answering from memory.
+
+When asked to save the result, use create_file or apply_changes and show the preview. Reference companion files within the skill folder.

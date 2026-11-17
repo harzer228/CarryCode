@@ -76,6 +76,46 @@ struct Builtin {
 
 const BUILTINS: &[Builtin] = &[
     Builtin {
+        name: "create-project",
+        body: include_str!("../../skills/create-project/SKILL.md"),
+    },
+    Builtin {
+        name: "implement-feature",
+        body: include_str!("../../skills/implement-feature/SKILL.md"),
+    },
+    Builtin {
+        name: "write-tests",
+        body: include_str!("../../skills/write-tests/SKILL.md"),
+    },
+    Builtin {
+        name: "run-and-verify",
+        body: include_str!("../../skills/run-and-verify/SKILL.md"),
+    },
+    Builtin {
+        name: "browser-check",
+        body: include_str!("../../skills/browser-check/SKILL.md"),
+    },
+    Builtin {
+        name: "desktop-check",
+        body: include_str!("../../skills/desktop-check/SKILL.md"),
+    },
+    Builtin {
+        name: "project-runbook",
+        body: include_str!("../../skills/project-runbook/SKILL.md"),
+    },
+    Builtin {
+        name: "simplify",
+        body: include_str!("../../skills/simplify/SKILL.md"),
+    },
+    Builtin {
+        name: "research-docs",
+        body: include_str!("../../skills/research-docs/SKILL.md"),
+    },
+    Builtin {
+        name: "report-issue",
+        body: include_str!("../../skills/report-issue/SKILL.md"),
+    },
+    Builtin {
         name: "code-review",
         body: include_str!("../../skills/code-review/SKILL.md"),
     },
@@ -95,10 +135,14 @@ pub fn discover(directory: &Path, bundle: &Path) -> Catalog {
     let home = crate::platform::home();
     let roots = [
         (directory.join(".carrycode/skills"), Source::Project),
+        (directory.join(".opencode/skills"), Source::Project),
+        (directory.join(".claude/skills"), Source::Project),
+        (directory.join(".agents/skills"), Source::Project),
         (bundle.join("skills"), Source::Bundle),
         (home.join(".carrycode/skills"), Source::User),
         (home.join(".agents/skills"), Source::Shared),
         (home.join(".claude/skills"), Source::Claude),
+        (home.join(".config/opencode/skills"), Source::Shared),
         (home.join(".codex/skills"), Source::Codex),
     ];
     let mut skills: Vec<Skill> = Vec::new();
@@ -270,6 +314,15 @@ fn read_text(path: &Path) -> Result<String> {
 }
 
 /// Full instruction body for a skill; built-ins stay inside the binary.
+pub fn resource(skill: &Skill, relative: &str) -> Result<String> {
+    let base = skill
+        .path
+        .as_deref()
+        .and_then(Path::parent)
+        .context("This skill has no companion files")?;
+    super::read_file(base, relative)
+}
+
 pub fn body(skill: &Skill) -> Result<String> {
     if let Some(builtin) = skill.builtin {
         let (_, body) = split_front_matter(builtin);
