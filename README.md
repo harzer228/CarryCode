@@ -246,3 +246,10 @@ Use **7 — Change password** to re-encrypt your profile. In the folder picker, 
 ## Участие в проекте
 
 [Руководство контрибьютора](CONTRIBUTING.md) · [Сообщить об ошибке или предложить улучшение](https://github.com/harzer228/flashGPT/issues/new/choose)
+
+## CLI в комплекте Full
+
+- **Пункт 1** запускает официальный терминальный агент OpenAI. [Codex CLI на GitHub](https://github.com/openai/codex)
+- **Пункт 2** запускает терминальный агент OpenCode. [OpenCode на GitHub](https://github.com/anomalyco/opencode)
+
+Версии и SHA-256 архивов закреплены в [runtimes.lock.json](runtimes.lock.json).
