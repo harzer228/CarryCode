@@ -514,8 +514,8 @@ fn init_document(directory: &Path) -> Result<Option<(PathBuf, String)>> {
     Ok(Some((target, content)))
 }
 
-fn prompt_extra(catalog: &skills::Catalog, hub: &mcp::Hub) -> String {
-    let mut text = String::new();
+fn prompt_extra(catalog: &skills::Catalog, hub: &mcp::Hub, mode: permissions::Mode) -> String {
+    let mut text = format!("\nCurrent tool permission mode: {}.", mode.identifier());
     if !catalog.is_empty() {
         text.push_str(
             "\n\nSkills. When the task matches a skill, load it first with \
@@ -581,7 +581,10 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
     let mut state: State = if path.exists() {
         serde_json::from_reader(fs::File::open(path)?.take(32 * 1024 * 1024))?
     } else {
-        State::default()
+        State {
+            web: web::Settings::builtin(),
+            ..State::default()
+        }
     };
     #[cfg(windows)]
     tasks::suppress_loader_dialogs();
@@ -660,13 +663,12 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
     }
     loop {
         let label = if let Some(provider) = &state.provider {
-            let extra = prompt_extra(&skills, &hub);
-            match build_request(provider, &history, diagnose, &extra) {
-                Ok(plan) => screen.set_usage(plan.input_tokens),
-                Err(_) => screen.set_usage(provider.input_limit().saturating_add(1)),
-            }
+            let extra = prompt_extra(&skills, &hub, screen.permission_mode());
+            let request = prepare_request(provider, &history, diagnose, &extra, &wire);
+            screen.set_input_estimate(input_estimate(&request));
             format!("{} / {}", provider.name, provider.model)
         } else {
+            screen.set_input_estimate(None);
             tr!("Модель не выбрана · /model", "No model selected · /model").into()
         };
         let Some(input) = screen.input(&history, &label, directory, diagnose)? else {
@@ -943,7 +945,7 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                         "\n\nBrowser starts on first use when enabled."
                     ));
                 }
-                if state.web.searx.is_none() && state.web.brave_key.is_none() {
+                if !state.web.enabled() {
                     details.push_str(tr!(
                         "\nВеб-поиск: выбери сервис в /search.",
                         "\nWeb search: choose a service in /search."
@@ -1162,12 +1164,10 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
         while step < 24 {
             let provider = turn_provider.clone();
             let messages = history.clone();
-            let extra = format!(
-                "\nCurrent tool permission mode: {}.{}",
-                screen.permission_mode().identifier(),
-                prompt_extra(&skills, &hub)
-            );
-            let mut plan = match build_request(&provider, &messages, diagnose, &extra) {
+            let extra = prompt_extra(&skills, &hub, screen.permission_mode());
+            let prepared = prepare_request(&provider, &messages, diagnose, &extra, &wire);
+            screen.set_input_estimate(input_estimate(&prepared));
+            let mut plan = match prepared {
                 Ok(plan) => plan,
                 Err(error) => {
                     chat_error(
@@ -1178,24 +1178,9 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                     break;
                 }
             };
-            replay_tools(&provider, &mut plan.body, &messages, &wire);
-            if !wire.is_empty() || provider.uses_deepseek_reasoning() {
-                match request_tokens(&provider, &plan.body) {
-                    Ok(tokens) => plan.input_tokens = tokens,
-                    Err(error) => {
-                        chat_error(
-                            &mut history,
-                            tr!("Параметры запроса", "Request setup"),
-                            error,
-                        );
-                        break;
-                    }
-                }
-            }
             for screenshot in &images {
                 attach_image(&provider, &mut plan.body, screenshot);
             }
-            screen.set_usage(plan.input_tokens);
             let input_tokens = plan.input_tokens;
             let canceled = Arc::new(AtomicBool::new(false));
             let cancel = canceled.clone();
@@ -2011,10 +1996,13 @@ fn request_permissions(screen: &mut ui::Screen, action: &Value) -> Result<String
         !reason.is_empty() && reason.chars().count() <= 600,
         "Give a reason of up to 600 characters"
     );
-    ensure!(
-        mode != screen.permission_mode(),
-        "That permission mode is already active"
-    );
+    if mode == screen.permission_mode() {
+        return Ok(tr!(
+            "Этот режим разрешений уже включён.",
+            "That permission mode is already active."
+        )
+        .into());
+    }
     if screen.request_permission(mode, reason)? {
         Ok(trf!(
             "Разрешения подтверждены: {} ({})",
@@ -2404,6 +2392,11 @@ fn search_menu(
     let options = [
         tr!("Найти в интернете", "Search the web").into(),
         tr!(
+            "Встроенный поиск · Mwmbl без ключа",
+            "Built-in search · Mwmbl without an API key"
+        )
+        .into(),
+        tr!(
             "Локальный SearXNG · подключиться к серверу на 127.0.0.1:8080",
             "Local SearXNG · connect to the server at 127.0.0.1:8080"
         )
@@ -2422,6 +2415,14 @@ fn search_menu(
             Ok(false)
         }
         Some(1) => {
+            *settings = web::Settings::builtin();
+            screen.notice(tr!(
+                "Mwmbl выбран. Запросы будут отправляться на api.mwmbl.org.",
+                "Mwmbl selected. Queries will be sent to api.mwmbl.org."
+            ));
+            Ok(true)
+        }
+        Some(2) => {
             let candidate = web::Settings::searx(web::LOCAL_SEARX.to_owned());
             match run_web_search(
                 screen,
@@ -2444,7 +2445,7 @@ fn search_menu(
                 None => Ok(false),
             }
         }
-        Some(2) => {
+        Some(3) => {
             let Some(address) = screen.ask_text(tr!("URL SearXNG", "SearXNG URL"), false)? else {
                 return Ok(false);
             };
@@ -2459,17 +2460,14 @@ fn search_menu(
                 }
             }
         }
-        Some(3) => {
+        Some(4) => {
             let Some(key) = screen.ask_text("Brave API key", true)? else {
                 return Ok(false);
             };
-            *settings = web::Settings {
-                brave_key: Some(key.trim().to_owned()),
-                ..Default::default()
-            };
+            *settings = web::Settings::brave(key.trim().to_owned());
             Ok(true)
         }
-        Some(4) => {
+        Some(5) => {
             *settings = web::Settings::default();
             Ok(true)
         }
@@ -2998,20 +2996,61 @@ fn build_request(
     })
 }
 
+fn prepare_request(
+    provider: &Provider,
+    history: &[Message],
+    diagnose: bool,
+    extra: &str,
+    wire: &WireCalls,
+) -> Result<RequestPlan> {
+    let mut plan = build_request(provider, history, diagnose, extra)?;
+    replay_tools(provider, &mut plan.body, history, wire);
+    if !wire.is_empty() || provider.uses_deepseek_reasoning() {
+        plan.input_tokens = request_tokens(provider, &plan.body)?;
+    }
+    Ok(plan)
+}
+
+#[derive(Debug)]
+struct InputLimitExceeded {
+    estimated: u32,
+    limit: u32,
+}
+
+impl std::fmt::Display for InputLimitExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&trf!(
+            "Вход модели ~{} токенов, а лимит {}. Начни /new, очисти историю или уменьши вложения. Лимит входа меняется в /model.",
+            "Model input is ~{} tokens but the limit is {}. Start /new, clear history or attach less. The input limit is edited in /model.",
+            self.estimated,
+            self.limit
+        ))
+    }
+}
+
+impl std::error::Error for InputLimitExceeded {}
+
+fn input_estimate(request: &Result<RequestPlan>) -> Option<u32> {
+    match request {
+        Ok(plan) => Some(plan.input_tokens),
+        Err(error) => error
+            .downcast_ref::<InputLimitExceeded>()
+            .map(|exceeded| exceeded.estimated),
+    }
+}
+
 fn request_tokens(provider: &Provider, body: &Value) -> Result<u32> {
     let input_tokens = u32::try_from(body.to_string().len().div_ceil(4))
         .unwrap_or(u32::MAX)
         .saturating_add(128);
     let limit = provider.input_limit();
-    ensure!(
-        input_tokens <= limit,
-        trf!(
-            "Вход модели ~{} токенов, а лимит {}. Начни /new, очисти историю или уменьши вложения. Лимит входа меняется в /model.",
-            "Model input is ~{} tokens but the limit is {}. Start /new, clear history or attach less. The input limit is edited in /model.",
-            input_tokens,
-            limit
-        )
-    );
+    if input_tokens > limit {
+        return Err(InputLimitExceeded {
+            estimated: input_tokens,
+            limit,
+        }
+        .into());
+    }
     Ok(input_tokens)
 }
 
@@ -4492,12 +4531,19 @@ mod provider_tests {
     #[test]
     fn input_limit_is_enforced_before_network() {
         let mut provider = provider("m", "k", 128_000);
+        let initial = prepare_request(&provider, &[], false, "", &WireCalls::new());
+        assert!(input_estimate(&initial).is_some_and(|tokens| tokens > 0));
+
         provider.input = Some(1_000);
-        let error = build_request(&provider, &[message(&"x".repeat(20_000))], false, "")
-            .unwrap_err()
-            .to_string();
+        let too_large = build_request(&provider, &[message(&"x".repeat(20_000))], false, "");
+        assert!(input_estimate(&too_large).is_some_and(|tokens| tokens > 5_000));
+        let error = too_large.unwrap_err().to_string();
         assert!(error.contains("1000") || error.contains("1 000"));
         assert!(error.contains("лимит") || error.contains("limit"));
+
+        let invalid = build_request(&provider, &[message(&"x".repeat(600_000))], false, "");
+        assert!(invalid.is_err());
+        assert_eq!(input_estimate(&invalid), None);
     }
 
     #[test]

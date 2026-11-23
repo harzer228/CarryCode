@@ -227,10 +227,6 @@ fn paste_text(text: &str) -> String {
     out
 }
 
-fn estimate(chars: usize) -> u32 {
-    u32::try_from(chars.div_ceil(4)).unwrap_or(u32::MAX)
-}
-
 struct Editor {
     buffer: Vec<char>,
     caret: usize,
@@ -434,7 +430,6 @@ struct CacheKey {
 struct Cache {
     key: CacheKey,
     lines: Vec<Line>,
-    chars: usize,
 }
 
 /// One saved model connection as the manager needs to see it.
@@ -516,7 +511,7 @@ pub struct Screen {
     context_limit: u32,
     input_limit: u32,
     output_limit: u32,
-    usage: u32,
+    input_estimate: Option<u32>,
     reasoning: super::Reasoning,
     reasoning_details: bool,
     background: Vec<u8>,
@@ -553,7 +548,7 @@ impl Screen {
             context_limit: CTX_TOKENS,
             input_limit: CTX_TOKENS.saturating_sub(4096),
             output_limit: 4096,
-            usage: 0,
+            input_estimate: None,
             reasoning: crate::native::Reasoning::Off,
             reasoning_details: false,
             background: Vec::new(),
@@ -590,8 +585,8 @@ impl Screen {
         self.desktop_active = active;
     }
 
-    pub fn set_usage(&mut self, tokens: u32) {
-        self.usage = tokens;
+    pub fn set_input_estimate(&mut self, tokens: Option<u32>) {
+        self.input_estimate = tokens;
     }
 
     pub fn report(&mut self, title: &str, body: &str) -> Result<()> {
@@ -614,7 +609,7 @@ impl Screen {
         self.permission_mode = Default::default();
         self.stats = Stats::default();
         self.turn = None;
-        self.usage = 0;
+        self.input_estimate = None;
         self.notice.clear();
         self.editor.clear();
         self.pastes.clear();
@@ -1106,10 +1101,6 @@ impl Screen {
         Some(item.to_owned())
     }
 
-    fn context(&self) -> u32 {
-        self.cache.as_ref().map_or(0, |cache| estimate(cache.chars))
-    }
-
     fn chat_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll = self.scroll.saturating_add(5),
@@ -1268,17 +1259,7 @@ impl Screen {
             };
             if self.cache.as_ref().map(|cache| cache.key) != Some(key) {
                 let lines = history_lines(history, content, self.details, self.reasoning_details);
-                let chars = history
-                    .iter()
-                    .map(|message| {
-                        message.content.chars().count()
-                            + message
-                                .reasoning
-                                .as_deref()
-                                .map_or(0, |reasoning| reasoning.chars().count())
-                    })
-                    .sum();
-                self.cache = Some(Cache { key, lines, chars });
+                self.cache = Some(Cache { key, lines });
             }
             let mut pending_lines = Vec::new();
             if let Some((text, reasoning)) = pending {
@@ -1381,20 +1362,12 @@ impl Screen {
         foot.push("╯", border);
         put_line(&mut out, margin, box_top + 2, &foot, content)?;
 
-        if streaming && menu.is_empty() {
+        if menu.is_empty() {
             put_line(
                 &mut out,
                 margin,
                 box_top + 3,
-                &self.spinner_line(content),
-                content,
-            )?;
-        } else if menu.is_empty() {
-            put_line(
-                &mut out,
-                margin,
-                box_top + 3,
-                &self.status_line(model, content),
+                &self.footer(model, content, streaming),
                 content,
             )?;
         } else {
@@ -1532,6 +1505,31 @@ impl Screen {
         line
     }
 
+    fn input_percentage(&self) -> Option<u64> {
+        self.input_estimate
+            .map(|used| u64::from(used) * 100 / u64::from(self.input_limit.max(1)))
+    }
+
+    fn footer(&self, model: &str, width: usize, streaming: bool) -> Line {
+        if self.armed && !streaming {
+            return self.status_line(model, width);
+        }
+        let over_limit = self
+            .input_estimate
+            .is_some_and(|used| used > self.input_limit);
+        let indicator = render::context_indicator(self.input_percentage(), over_limit);
+        let indicator_start = width.saturating_sub(indicator.width());
+        let left_width = indicator_start.saturating_sub(2);
+        let mut line = if streaming {
+            self.spinner_line(left_width)
+        } else {
+            self.status_line(model, left_width)
+        };
+        line.pad_to(indicator_start, Style::plain());
+        line.extend(indicator);
+        line.truncate(width)
+    }
+
     fn status_line(&self, model: &str, width: usize) -> Line {
         let model = if width < 60 {
             model.rsplit(" / ").next().unwrap_or(model)
@@ -1550,31 +1548,12 @@ impl Screen {
             );
             return line.truncate(width);
         }
-        let used = if self.usage > 0 {
-            self.usage
-        } else {
-            self.context()
-        };
-        let percent = used.saturating_mul(100) / self.input_limit.max(1);
         let mut segments: Vec<Line> = Vec::new();
         let mut head = Line::new();
         head.push("  ", Style::plain());
         head.push("● ", Style::brand());
         head.push(model, Style::fg(render::FG));
         segments.push(head);
-        segments.push(Line::of(
-            format!(
-                "ctx {}/{} ({}%)",
-                render::human(used),
-                render::human(self.input_limit),
-                percent
-            ),
-            if percent >= 85 {
-                Style::fg(render::WARN)
-            } else {
-                Style::dim()
-            },
-        ));
         if self.reasoning != super::Reasoning::Off {
             segments.push(Line::of(
                 format!("r {}", self.reasoning.label()),
@@ -1620,12 +1599,12 @@ impl Screen {
     }
 
     fn status_panel(&mut self, model: &str, directory: &Path) -> Result<()> {
-        let used = if self.usage > 0 {
-            self.usage
-        } else {
-            self.context()
-        };
-        let percent = used.saturating_mul(100) / self.input_limit.max(1);
+        let used = self
+            .input_estimate
+            .map_or("—".into(), |used| format!("~{used}"));
+        let remaining = self.input_estimate.map_or("—".into(), |used| {
+            format!("~{}", self.input_limit.saturating_sub(used))
+        });
         let mode = if self.diagnose {
             tr!("диагностика", "diagnose")
         } else {
@@ -1634,17 +1613,13 @@ impl Screen {
         let rows = [
             (tr!("модель", "model"), model.to_owned()),
             (tr!("окно", "window"), render::human(self.context_limit)),
-            (tr!("вход", "input"), render::human(self.input_limit)),
-            (tr!("выход", "output"), render::human(self.output_limit)),
             (
-                tr!("занято", "used"),
-                format!(
-                    "{} / {} ({}%)",
-                    render::human(used),
-                    render::human(self.input_limit),
-                    percent
-                ),
+                tr!("лимит входа", "input limit"),
+                self.input_limit.to_string(),
             ),
+            (tr!("выход", "output"), render::human(self.output_limit)),
+            (tr!("занято (оценка)", "used (estimate)"), used),
+            (tr!("осталось", "remaining"), remaining),
             (
                 tr!("reasoning", "reasoning"),
                 if self.reasoning == super::Reasoning::Off {
@@ -1683,7 +1658,7 @@ impl Screen {
         let mut body = Vec::new();
         for (key, value) in rows {
             let mut line = Line::new();
-            line.push(format!("{key:<10}"), Style::dim());
+            line.push(format!("{key:<16} "), Style::dim());
             line.push(value, Style::fg(render::FG));
             body.push(line);
         }
@@ -4128,9 +4103,8 @@ mod tests {
         assert_eq!(menu_items("draft /per", false, false)[0].0, "/permissions");
     }
 
-    #[test]
-    fn tool_turns_count_every_streamed_reply() {
-        let mut screen = Screen {
+    fn test_screen() -> Screen {
+        Screen {
             editor: Editor::new(),
             pastes: Vec::new(),
             submitted_pastes: Vec::new(),
@@ -4152,7 +4126,7 @@ mod tests {
             context_limit: CTX_TOKENS,
             input_limit: CTX_TOKENS.saturating_sub(4096),
             output_limit: 4096,
-            usage: 0,
+            input_estimate: None,
             reasoning: crate::native::Reasoning::Off,
             reasoning_details: false,
             background: Vec::new(),
@@ -4162,7 +4136,12 @@ mod tests {
             selection: None,
             permission_mode: crate::native::permissions::Mode::Ask,
             approval_card: false,
-        };
+        }
+    }
+
+    #[test]
+    fn tool_turns_count_every_streamed_reply() {
+        let mut screen = test_screen();
         screen.begin_turn(Instant::now() - Duration::from_secs(2));
         screen.track("first", "");
         screen.record_reply(100, 10, false, 0.1);
@@ -4175,7 +4154,7 @@ mod tests {
         assert!(receipt.duration >= 2.0 && receipt.estimated);
         assert_eq!(screen.stats.turns, 1);
         screen.stage_input("old draft".to_owned());
-        screen.set_usage(500);
+        screen.set_input_estimate(Some(500));
         screen.reset_conversation();
         screen.paste_prompt(&"draft line\n".repeat(60));
         assert!(screen.editor.is_empty() && screen.turn.is_none());
@@ -4186,7 +4165,7 @@ mod tests {
         assert!(screen.permission_mode() == crate::native::permissions::Mode::Auto);
         assert!(screen.stats.last.is_none());
         assert_eq!(screen.stats.turns, 0);
-        assert_eq!(screen.usage, 0);
+        assert_eq!(screen.input_estimate, None);
         assert!(!screen.submit_queued);
         assert!(screen.queued.is_empty());
     }
@@ -4282,11 +4261,39 @@ mod tests {
     }
 
     #[test]
-    fn token_estimates_follow_the_design() {
-        assert_eq!(estimate(0), 0);
-        assert_eq!(estimate(1), 1);
-        assert_eq!(estimate(4), 1);
-        assert_eq!(estimate(5), 2);
+    fn footer_reserves_space_for_context_in_idle_and_streaming_views() {
+        let mut screen = test_screen();
+        screen.set_limits(128_000, 100_000, 4_000, super::super::Reasoning::Off);
+        screen.set_input_estimate(Some(72_000));
+        screen.begin_turn(Instant::now());
+        let model = "provider / a-model-with-a-very-long-name-that-can-fill-the-whole-footer";
+        for streaming in [false, true] {
+            for width in [40, 60, 80, 120] {
+                let footer = screen.footer(model, width, streaming);
+                let text = footer.plain_text();
+                assert_eq!(footer.width(), width);
+                assert!(text.ends_with("  ctx 72% "));
+                assert!(!text.contains(['▰', '▱']));
+            }
+        }
+        screen.stage_input("draft".repeat(500));
+        assert_eq!(screen.input_percentage(), Some(72));
+        screen.set_limits(128_000, 72_000, 4_000, super::super::Reasoning::Off);
+        assert!(
+            screen
+                .footer(model, 80, false)
+                .plain_text()
+                .ends_with("100% ")
+        );
+        screen.set_input_estimate(Some(72_001));
+        assert!(
+            screen
+                .footer(model, 80, false)
+                .plain_text()
+                .ends_with("100%+ ")
+        );
+        screen.reset_conversation();
+        assert!(screen.footer(model, 80, false).plain_text().ends_with("— "));
     }
     #[test]
     fn reasoning_history_collapses_and_f3_expands() {

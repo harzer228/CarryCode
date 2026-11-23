@@ -721,6 +721,23 @@ fn mix(from: [f32; 3], to: [f32; 3], t: f32) -> Color {
     }
 }
 
+pub fn context_indicator(percent: Option<u64>, over_limit: bool) -> Line {
+    let label = match percent {
+        Some(_) if over_limit => "100%+".to_owned(),
+        Some(percent) => format!("{percent}%"),
+        None => "—".to_owned(),
+    };
+    let text_style = match percent {
+        Some(85..) => Style::fg(WARN),
+        Some(_) => Style::brand(),
+        None => Style::dim(),
+    };
+    let padding = 5usize.saturating_sub(label.as_str().width());
+    let mut line = Line::of(format!("{}ctx ", " ".repeat(padding)), Style::dim());
+    line.push(format!("{label} "), text_style);
+    line
+}
+
 pub fn human(tokens: u32) -> String {
     if tokens >= 1000 {
         format!("{:.1}k", tokens as f32 / 1000.)
@@ -853,6 +870,28 @@ mod tests {
                 .chars()
                 .all(|c| matches!(c, ' ' | '▀' | '▄' | '█'))
         }));
+    }
+
+    #[test]
+    fn context_indicator_keeps_its_width_and_warns_at_eighty_five_percent() {
+        let width = context_indicator(Some(0), false).width();
+        for (percent, over_limit, label, color) in [
+            (0, false, "0%", BRAND),
+            (72, false, "72%", BRAND),
+            (84, false, "84%", BRAND),
+            (85, false, "85%", WARN),
+            (100, false, "100%", WARN),
+            (100, true, "100%+", WARN),
+        ] {
+            let indicator = context_indicator(Some(percent), over_limit);
+            assert_eq!(indicator.width(), width);
+            assert_eq!(indicator.plain_text().trim(), format!("ctx {label}"));
+            assert_eq!(indicator.spans.last().unwrap().style.fg, Some(color));
+            assert!(indicator.spans.iter().all(|span| span.style.bg.is_none()));
+        }
+        let unknown = context_indicator(None, false);
+        assert_eq!(unknown.width(), width);
+        assert_eq!(unknown.plain_text().trim(), "ctx —");
     }
 
     #[test]

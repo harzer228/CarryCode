@@ -139,11 +139,34 @@ impl Browser {
         if page {
             request["sessionId"] = json!(self.session);
         }
-        self.socket.send(Message::text(request.to_string()))?;
-        let deadline = Instant::now() + Duration::from_secs(8);
+        self.socket
+            .send(Message::text(request.to_string()))
+            .with_context(|| format!("Browser could not send {method}"))?;
+        let deadline = Instant::now() + Duration::from_secs(12);
         loop {
-            ensure!(Instant::now() < deadline, "Browser tool timed out");
-            let event = self.socket.read()?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            ensure!(
+                !remaining.is_zero(),
+                "Browser timed out waiting for {method}"
+            );
+            self.socket
+                .get_mut()
+                .set_read_timeout(Some(remaining.min(Duration::from_secs(5))))?;
+            let event = match self.socket.read() {
+                Ok(event) => event,
+                Err(tungstenite::Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(error)
+                        .context(format!("Browser could not receive the reply to {method}")));
+                }
+            };
             let Ok(text) = event.to_text() else {
                 continue;
             };
@@ -329,9 +352,25 @@ impl Browser {
                 let id = args["tab"].as_str().unwrap_or(&self.target).to_owned();
                 let result = self.rpc("Target.closeTarget", json!({"targetId":id}), false)?;
                 ensure!(result["success"] != false, "Tab could not be closed");
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let available = loop {
+                    let targets = self.rpc("Target.getTargets", json!({}), false)?;
+                    let still_open = targets["targetInfos"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|tab| tab["targetId"] == id);
+                    if !still_open {
+                        break targets;
+                    }
+                    ensure!(
+                        Instant::now() < deadline,
+                        "Browser did not finish closing the tab"
+                    );
+                    thread::sleep(Duration::from_millis(40));
+                };
                 if id == self.target {
                     self.session.clear();
-                    let available = self.rpc("Target.getTargets", json!({}), false)?;
                     if let Some(next) = available["targetInfos"]
                         .as_array()
                         .into_iter()
@@ -502,7 +541,7 @@ mod tests {
             .apply()?;
         fs::write(
             root.path().join("form.html"),
-            "<!doctype html><title>Form</title><label for=name>Name</label><input id=name value=old>",
+            "<!doctype html><title>Form</title><label for=name>Name</label><input id=name value=old><div style='height:150vh'></div>",
         )?;
         let preview = super::super::preview::Preview::start(root.path())?;
         let mut browser = Browser::start()?;
@@ -555,6 +594,48 @@ mod tests {
             true,
         )?;
         assert_eq!(result["result"]["value"], "CarryCode");
+        browser.call("type", &json!({"selector":"#name","text":" QA"}))?;
+        let result = browser.rpc(
+            "Runtime.evaluate",
+            json!({"expression":"document.querySelector('#name').value","returnByValue":true}),
+            true,
+        )?;
+        assert_eq!(result["result"]["value"], "CarryCode QA");
+        browser.call("scroll", &json!({"delta":400}))?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let position = browser.rpc(
+                "Runtime.evaluate",
+                json!({"expression":"window.scrollY","returnByValue":true}),
+                true,
+            )?;
+            if position["result"]["value"]
+                .as_f64()
+                .is_some_and(|y| y > 0.0)
+            {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "Browser scroll did not move the page"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        let original = browser.target.clone();
+        browser.call("new_tab", &json!({}))?;
+        let second = browser.target.clone();
+        assert_ne!(original, second);
+        browser.call("select_tab", &json!({"tab":original}))?;
+        assert_eq!(browser.target, original);
+        browser.call("close_tab", &json!({"tab":second}))?;
+        let (tabs, _) = browser.call("tabs", &json!({}))?;
+        assert!(
+            tabs.contains(&original) && !tabs.contains(&second),
+            "{tabs}"
+        );
+        browser.call("new_tab", &json!({}))?;
+        browser.call("close_tab", &json!({}))?;
+        assert_eq!(browser.target, original);
         Ok(())
     }
 }

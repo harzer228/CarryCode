@@ -22,7 +22,8 @@ CarryCode пригодится, если ты работаешь с кодом �
 - На Windows CarryCode выбирает PowerShell 7, а при его отсутствии — Windows PowerShell 5.1. На Linux используется Bash. В выводе отдельно указаны код завершения, stdout и stderr.
 - Скрытый Chromium, Chrome или Edge запускается при первом обращении агента. `/browser` управляет доступностью. Снимки страницы поддерживаются у моделей с включённым параметром **«Изображения»** в `/model`.
 - В Windows агент может запросить список обычных окон, выбрать окно и переключить цель. `/computer` открывает ручной выбор и управление доступностью, **F8** останавливает управление.
-- `/search запрос` показывает результаты интернет-поиска. Сначала открой `/search` и выбери свой SearXNG или укажи ключ Brave Search. Поиск запускается без подтверждения, **Esc** отменяет ожидание. Для локального SearXNG запусти сервер на `127.0.0.1:8080` и включи `json` в `search.formats`. При выборе локального сервера CarryCode проверит его коротким тестовым запросом. SearXNG обращается к поисковым системам через интернет. [Установка SearXNG в контейнере](https://docs.searxng.org/admin/installation-docker) · [Настройка JSON API](https://docs.searxng.org/dev/search_api.html)
+- `/search запрос` показывает результаты интернет-поиска. В новых профилях агента запросы идут напрямую в Mwmbl через интернет. Встроенный поиск доступен в Lite и Full без Docker, API-ключа и отдельной установки. Для существующего профиля его можно выбрать в `/search` → **Встроенный поиск · Mwmbl без ключа**. У анонимного доступа есть лимиты на IP-адрес. **Esc** отменяет ожидание. [API и лимиты Mwmbl](https://developer.mwmbl.org/)
+- В `/search` также можно выключить поиск, указать ключ Brave Search или подключить свой SearXNG. Для локального варианта запусти SearXNG на `127.0.0.1:8080` и включи `json` в `search.formats`. CarryCode проверит его коротким запросом. [Установка SearXNG](https://docs.searxng.org/admin/installation.html) · [Настройка JSON API](https://docs.searxng.org/dev/search_api.html)
 
 ### Модели
 
@@ -134,7 +135,7 @@ CarryCode пригодится, если ты работаешь с кодом �
 - **Lite** — лаунчер и встроенный CarryCode Agent. Для работы агента нужны подключение к провайдеру и интернет.
 - **Full** — то же, плюс Codex CLI и OpenCode для Windows и Linux.
 
-[Скачать CarryCode 0.1.0-beta.6](https://github.com/harzer228/flashGPT/releases/tag/v0.1.0-beta.6). Это бета-версия, возможны баги.
+[Скачать CarryCode 0.1.0-beta.6.1](https://github.com/harzer228/CarryCode/releases/tag/v0.1.0-beta.6.1). Это бета-версия, возможны баги.
 
 1. Скачай установщик Windows или переносимый ZIP и проверь SHA-256. Установи или распакуй комплект в папку на USB, например `F:\CarryCode`. [Последний выпуск](https://github.com/harzer228/flashGPT/releases/latest)
 2. Открой `flashGPT.exe` в Windows или запусти `./flashgpt` из каталога комплекта в терминале Linux. Создай и запомни пароль профиля или введи прежний.
@@ -227,7 +228,7 @@ cargo run --locked -p xtask -- package
 
 Результат появится в `dist/`. Для upstream-клиентов действуют их лицензии из `licenses/`.
 
-Чтобы собрать установщики, сначала выполни `xtask package` и `xtask package-lite`. Затем запусти в PowerShell на Windows `./installer/build.ps1 -Version 0.1.0-beta.6`. Inno Setup создаст Lite и Full EXE с отдельными контрольными суммами в `dist/`.
+Чтобы собрать установщики, сначала выполни `xtask package` и `xtask package-lite`. Затем запусти в PowerShell на Windows `./installer/build.ps1 -Version 0.1.0-beta.6.1`. Inno Setup создаст Lite и Full EXE с отдельными контрольными суммами в `dist/`.
 
 ## Quick start
 

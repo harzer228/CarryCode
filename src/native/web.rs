@@ -11,20 +11,48 @@ use url::Url;
 
 pub const LOCAL_SEARX: &str = "http://127.0.0.1:8080";
 pub const TIMEOUT: Duration = Duration::from_secs(15);
+const MWMBL_SEARCH: &str = "https://api.mwmbl.org/api/v2/search/";
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Settings {
     pub searx: Option<String>,
     pub brave_key: Option<String>,
+    #[serde(default)]
+    mwmbl: bool,
 }
 
 impl Settings {
     pub fn searx(url: String) -> Self {
         Self {
             searx: Some(url),
-            brave_key: None,
+            ..Self::default()
         }
     }
+
+    pub fn brave(key: String) -> Self {
+        Self {
+            brave_key: Some(key),
+            ..Self::default()
+        }
+    }
+
+    pub fn builtin() -> Self {
+        Self {
+            mwmbl: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.searx.is_some() || self.brave_key.is_some() || self.mwmbl
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchSource {
+    Searx,
+    Brave,
+    Mwmbl,
 }
 
 fn client() -> ureq::AgentBuilder {
@@ -46,14 +74,14 @@ pub fn search(settings: &Settings, query: &str) -> Result<String> {
         "Expected a single search query of up to 500 characters"
     );
     let agent = client().build();
-    let (response, searx) = if let Some(base) = &settings.searx {
+    let (response, source) = if let Some(base) = &settings.searx {
         (
             agent
                 .get(&format!("{base}/search"))
                 .query("q", query)
                 .query("format", "json")
                 .call(),
-            true,
+            SearchSource::Searx,
         )
     } else if let Some(key) = &settings.brave_key {
         (
@@ -63,16 +91,25 @@ pub fn search(settings: &Settings, query: &str) -> Result<String> {
                 .query("maximum_number_of_urls", "8")
                 .set("X-Subscription-Token", key)
                 .call(),
-            false,
+            SearchSource::Brave,
+        )
+    } else if settings.mwmbl {
+        (
+            agent
+                .get(MWMBL_SEARCH)
+                .query("q", query)
+                .set("Accept", "application/json")
+                .call(),
+            SearchSource::Mwmbl,
         )
     } else {
         bail!(tr!(
-            "Выбери SearXNG или Brave Search в меню /search.",
-            "Select SearXNG or Brave Search from the /search menu."
+            "Веб-поиск выключен. Выбери поисковик в /search.",
+            "Web search is off. Choose a search provider in /search."
         ));
     };
     let response = response.map_err(|error| match error {
-        ureq::Error::Status(403, _) if searx => anyhow::anyhow!(tr!(
+        ureq::Error::Status(403, _) if source == SearchSource::Searx => anyhow::anyhow!(tr!(
             "SearXNG запретил запрос (HTTP 403). Проверь доступ и формат json в search.formats.",
             "SearXNG denied the request (HTTP 403). Check access and enable json in search.formats."
         )),
@@ -80,18 +117,27 @@ pub fn search(settings: &Settings, query: &str) -> Result<String> {
             "SearXNG не отвечает на 127.0.0.1:8080. Запусти локальный сервер или выбери другой сервис в /search.",
             "SearXNG is not responding at 127.0.0.1:8080. Start the local server or choose another service in /search."
         )),
+        ureq::Error::Status(429, _) if source == SearchSource::Mwmbl => anyhow::anyhow!(tr!(
+            "Mwmbl ограничил запросы с этого IP (HTTP 429). Повтори поиск позже или выбери другой сервис в /search.",
+            "Mwmbl rate-limited this IP (HTTP 429). Try again later or choose another provider in /search."
+        )),
+        other if source == SearchSource::Mwmbl => anyhow::anyhow!("Mwmbl: {}", network_error(other)),
         other => network_error(other),
     })?;
     let body = bounded(response, 512 * 1024)?;
     let value: Value = serde_json::from_str(&body).context("Search service did not return JSON")?;
-    format_results(&value, searx)
+    let formatted = format_results(&value, source)?;
+    if source == SearchSource::Mwmbl {
+        Ok(format!("Mwmbl\n\n{formatted}"))
+    } else {
+        Ok(formatted)
+    }
 }
 
-fn format_results(value: &Value, searx: bool) -> Result<String> {
-    let results = if searx {
-        &value["results"]
-    } else {
-        &value["grounding"]["generic"]
+fn format_results(value: &Value, source: SearchSource) -> Result<String> {
+    let results = match source {
+        SearchSource::Searx | SearchSource::Mwmbl => &value["results"],
+        SearchSource::Brave => &value["grounding"]["generic"],
     };
     let items = results
         .as_array()
@@ -101,13 +147,11 @@ fn format_results(value: &Value, searx: bool) -> Result<String> {
         let Some(address) = item["url"].as_str() else {
             continue;
         };
-        if public_url(address).is_err() {
+        if address.chars().any(char::is_control) || public_url(address).is_err() {
             continue;
         }
         let title = item["title"].as_str().unwrap_or(address);
-        let snippets = if searx {
-            item["content"].as_str().unwrap_or("").to_owned()
-        } else {
+        let snippets = if source == SearchSource::Brave {
             item["snippets"]
                 .as_array()
                 .map(|items| {
@@ -118,6 +162,8 @@ fn format_results(value: &Value, searx: bool) -> Result<String> {
                         .join(" ")
                 })
                 .unwrap_or_default()
+        } else {
+            item["content"].as_str().unwrap_or("").to_owned()
         };
         output.push(format!(
             "{}\n{}\n{}",
@@ -129,7 +175,9 @@ fn format_results(value: &Value, searx: bool) -> Result<String> {
     if !output.is_empty() {
         return Ok(output.join("\n\n"));
     }
-    if searx && let Some(engines) = value["unresponsive_engines"].as_array() {
+    if source == SearchSource::Searx
+        && let Some(engines) = value["unresponsive_engines"].as_array()
+    {
         let failed: Vec<_> = engines
             .iter()
             .filter_map(|engine| engine[0].as_str().map(|name| clean(name, 40)))
@@ -334,16 +382,25 @@ fn html_text(html: &str) -> String {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires network access to the Mwmbl API"]
+    fn live_mwmbl_search_returns_public_results() -> Result<()> {
+        let result = search(&Settings::builtin(), "Rust programming language")?;
+        assert!(result.starts_with("Mwmbl\n\n"));
+        assert!(result.contains("rust-lang.org"));
+        Ok(())
+    }
+
+    #[test]
     fn reads_searx_and_brave_result_shapes() -> Result<()> {
         let searx = serde_json::json!({"results": [
             {"url":"https://docs.rs","title":"Docs.rs","content":"Rust docs"},
             {"url":"http://127.0.0.1/","title":"Private","content":"not a public result"}
         ]});
-        let formatted = format_results(&searx, true)?;
+        let formatted = format_results(&searx, SearchSource::Searx)?;
         assert!(formatted.contains("Docs.rs\nhttps://docs.rs\nRust docs"));
         assert!(!formatted.contains("Private"));
         let brave = serde_json::json!({"grounding":{"generic":[{"url":"https://doc.rust-lang.org","title":"Rust","snippets":["Reference","Library"]}]}});
-        assert!(format_results(&brave, false)?.contains("Reference Library"));
+        assert!(format_results(&brave, SearchSource::Brave)?.contains("Reference Library"));
         Ok(())
     }
 
@@ -352,9 +409,48 @@ mod tests {
         let value = serde_json::json!({
             "results": [], "unresponsive_engines": [["duckduckgo", "timeout"]]
         });
-        let error = format_results(&value, true).unwrap_err();
+        let error = format_results(&value, SearchSource::Searx).unwrap_err();
         assert!(error.to_string().contains("duckduckgo"));
-        assert!(format_results(&serde_json::json!({"results": []}), true).is_ok());
+        assert!(format_results(&serde_json::json!({"results": []}), SearchSource::Searx).is_ok());
+    }
+
+    #[test]
+    fn mwmbl_results_include_public_links_and_snippets() -> Result<()> {
+        let value = serde_json::json!({
+            "query": "rust",
+            "number_of_results": 3,
+            "results": [
+                {"url": "https://doc.rust-lang.org/book/", "title": "Rust Book", "content": "Get started with Rust."},
+                {"url": "http://127.0.0.1/secret", "title": "Local"},
+                {"url": "https://example.org/\n", "title": "Invalid"}
+            ]
+        });
+        assert_eq!(
+            format_results(&value, SearchSource::Mwmbl)?,
+            "Rust Book\nhttps://doc.rust-lang.org/book/\nGet started with Rust."
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_search_settings_keep_their_provider_and_saved_disable() -> Result<()> {
+        let disabled: Settings = serde_json::from_str(r#"{"searx":null,"brave_key":null}"#)?;
+        assert!(!disabled.enabled());
+
+        let searx: Settings =
+            serde_json::from_str(r#"{"searx":"http://127.0.0.1:8080","brave_key":null}"#)?;
+        assert_eq!(searx.searx.as_deref(), Some(LOCAL_SEARX));
+        assert!(!searx.mwmbl);
+
+        let brave: Settings = serde_json::from_str(r#"{"searx":null,"brave_key":"test"}"#)?;
+        assert_eq!(brave.brave_key.as_deref(), Some("test"));
+        assert!(!brave.mwmbl);
+
+        let builtin: Settings =
+            serde_json::from_str(&serde_json::to_string(&Settings::builtin())?)?;
+        assert!(builtin.enabled() && builtin.mwmbl);
+        assert!(builtin.searx.is_none() && builtin.brave_key.is_none());
+        Ok(())
     }
 
     #[test]

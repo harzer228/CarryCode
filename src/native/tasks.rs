@@ -263,6 +263,16 @@ pub(super) struct Output {
     pub text: String,
 }
 
+fn discard_inherited_env(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    name.contains("KEY")
+        || name.contains("TOKEN")
+        || name.contains("SECRET")
+        || name.contains("PASSWORD")
+        || matches!(name.as_str(), "GIT_CONFIG_COUNT" | "GIT_CONFIG_PARAMETERS")
+        || name.starts_with("GIT_CONFIG_VALUE_")
+}
+
 pub(super) fn execute_cancellable(
     mut child: Command,
     directory: &Path,
@@ -279,12 +289,7 @@ pub(super) fn execute_cancellable(
         .stdout(stdout.try_clone()?)
         .stderr(stderr.try_clone()?);
     for (key, _) in std::env::vars_os() {
-        let name = key.to_string_lossy().to_ascii_uppercase();
-        if name.contains("KEY")
-            || name.contains("TOKEN")
-            || name.contains("SECRET")
-            || name.contains("PASSWORD")
-        {
+        if discard_inherited_env(&key.to_string_lossy()) {
             child.env_remove(key);
         }
     }
@@ -545,6 +550,20 @@ mod tests {
         assert!(command.contains("echo shell-ok"));
         assert!(legacy_chain("Write-Output 'literal && unchanged'").is_none());
         assert!(legacy_chain("Get-ChildItem | Select-Object Name && echo finished").is_none());
+    }
+
+    #[test]
+    fn git_command_overrides_are_removed_together() {
+        for key in [
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+            "git_config_value_11",
+            "GIT_CONFIG_PARAMETERS",
+        ] {
+            assert!(discard_inherited_env(key), "{key}");
+        }
+        assert!(!discard_inherited_env("GIT_CONFIG_NOSYSTEM"));
     }
 
     #[test]

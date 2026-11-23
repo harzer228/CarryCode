@@ -1,9 +1,9 @@
 <div align="center">
   <h1><img src="media/banner.png" alt="CarryCode. Fix problems. Code anywhere." width="100%"></h1>
   <p>
-    <a href="https://github.com/harzer228/flashGPT/releases/download/v0.1.0-beta.6/CarryCode-Lite-Setup-Windows-x64.exe"><strong>Windows Lite</strong></a>
-    · <a href="https://github.com/harzer228/flashGPT/releases/download/v0.1.0-beta.6/CarryCode-Full-Setup-Windows-x64.exe"><strong>Windows Full</strong></a>
-    · <a href="https://github.com/harzer228/flashGPT/releases/tag/v0.1.0-beta.6">Portable ZIPs, release notes and SHA-256</a>
+    <a href="https://github.com/harzer228/CarryCode/releases/download/v0.1.0-beta.6.1/CarryCode-Lite-Setup-Windows-x64.exe"><strong>Windows Lite</strong></a>
+    · <a href="https://github.com/harzer228/CarryCode/releases/download/v0.1.0-beta.6.1/CarryCode-Full-Setup-Windows-x64.exe"><strong>Windows Full</strong></a>
+    · <a href="https://github.com/harzer228/CarryCode/releases/tag/v0.1.0-beta.6.1">Portable ZIPs, release notes and SHA-256</a>
     · <a href="../README.md">На русском</a>
     · <a href="../CHANGELOG.md">Changelog</a>
   </p>
@@ -17,7 +17,9 @@
 
 The native agent can create projects, review groups of file changes, and run confirmed PowerShell or Bash commands. Open `/project` for Web, Python, and Rust starters. Use `/tools` for the current tool list.
 
-`/browser` controls installed Chromium, Chrome, or Edge in the background. It exposes the page accessibility tree, console messages and screenshots. Enable **Images** in `/model` to let a vision model inspect a screenshot. On Windows, `/computer` selects a single application window. `/search` uses SearXNG or Brave Search without an approval prompt. The local preset verifies that SearXNG at `127.0.0.1:8080` accepts JSON search requests. Press **Esc** to cancel a pending search. New conversations start in **Approve for me** mode. **F6** changes permissions during a turn. Model settings take effect with the next user message.
+`/browser` controls installed Chromium, Chrome, or Edge in the background. It exposes the page accessibility tree, console messages and screenshots. Enable **Images** in `/model` to let a vision model inspect a screenshot. On Windows, `/computer` selects a single application window. New conversations start in **Approve for me** mode. **F6** changes permissions during a turn. Model settings take effect with the next user message.
+
+`/search query` sends a web search directly to Mwmbl over the internet in new agent profiles. The built-in option works in Lite and Full without Docker, an API key, or a separate install. Existing profiles can select **Built-in search** in `/search`. Anonymous queries have per-IP limits. The same menu can disable search or connect Brave Search or a SearXNG server with JSON enabled. Press **Esc** to cancel a pending search. [Mwmbl API and limits](https://developer.mwmbl.org/)
 
 Open `/model` to add models with **A**, reuse the selected connection with **N**, or choose from its catalog with **F4**. Saving with blank limits looks them up in the catalog and asks you to fill in any remaining fields. **F5** checks reasoning with a short test request. Final replies show elapsed time, token use and generation speed. `@` attaches a project text file without expanding it in chat. On Windows, **F7** pastes directly from the clipboard and groups long text into a compact attachment. [Agent instructions](../README.md#carrycode-agent--экспериментальная-альфа)
 
@@ -34,7 +36,7 @@ Plug in the USB drive, open CarryCode, pick Codex or OpenCode, and choose the pr
 3. **Choose an agent and project folder.** Use the arrow keys and **Enter** to open folders, then select **Choose this folder** or press **F2**. Sign in through Codex or use `/connect` in OpenCode.
 4. **Move to another computer.** Exit the CLI, wait for the profile to save, and close the menu before ejecting. Run CarryCode from the same USB bundle and unlock it with the same password.
 
-**Lite** contains the launcher and CarryCode Agent. **Full** also bundles Codex CLI and OpenCode for Windows and Linux. Beta 6 may contain bugs.
+**Lite** contains the launcher and CarryCode Agent. **Full** also bundles Codex CLI and OpenCode for Windows and Linux. Beta 6.1 may contain bugs.
 
 On Windows, open PowerShell in the download folder and run `Get-FileHash -Algorithm SHA256 .\CarryCode-Full-Setup-Windows-x64.exe`, or use the Lite filename. Compare the result with the matching `.exe.sha256` file from the same release. For ZIP downloads on Linux, run `sha256sum -c SHA256SUMS` for Full or `sha256sum -c SHA256SUMS-lite` for Lite. The Windows installers are unsigned.
 
