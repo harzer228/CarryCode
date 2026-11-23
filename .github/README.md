@@ -48,3 +48,10 @@ To update a flashGPT installation, close the launcher and its CLI clients, then 
 ## Contribute
 
 Try the quick start, report a reproducible bug, or propose an improvement to the USB workflow. [Contributor guide](../CONTRIBUTING.md) · [Issue forms](https://github.com/harzer228/flashGPT/issues/new/choose) · [Profile security](../SECURITY.md)
+
+## CLI tools in Full
+
+- **Option 1** opens OpenAI's official terminal coding agent. [Codex CLI on GitHub](https://github.com/openai/codex)
+- **Option 2** opens OpenCode. [OpenCode on GitHub](https://github.com/anomalyco/opencode)
+
+The pinned versions and archive SHA-256 hashes are listed in [runtimes.lock.json](../runtimes.lock.json).
