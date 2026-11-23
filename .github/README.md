@@ -19,7 +19,7 @@ The native agent can create projects, review groups of file changes, and run con
 
 `/browser` controls installed Chromium, Chrome, or Edge in the background. It exposes the page accessibility tree, console messages and screenshots. Enable **Images** in `/model` to let a vision model inspect a screenshot. On Windows, `/computer` selects a single application window. `/search` uses SearXNG or Brave Search without an approval prompt. The local preset verifies that SearXNG at `127.0.0.1:8080` accepts JSON search requests. Press **Esc** to cancel a pending search. New conversations start in **Approve for me** mode. **F6** changes permissions during a turn. Model settings take effect with the next user message.
 
-Open `/model` to save models and set context, token limits and reasoning for each one. **N** adds a second model with the selected connection. **F4** opens the provider catalog and **F5** checks reasoning with a short test request. Provider errors appear in the chat. Drag over a response and press **Ctrl+C** to copy the selection. [Agent instructions](../README.md#carrycode-agent--экспериментальная-альфа)
+Open `/model` to add models with **A**, reuse the selected connection with **N**, or choose from its catalog with **F4**. Saving with blank limits looks them up in the catalog and asks you to fill in any remaining fields. **F5** checks reasoning with a short test request. Final replies show elapsed time, token use and generation speed. `@` attaches a project text file without expanding it in chat. On Windows, **F7** pastes directly from the clipboard and groups long text into a compact attachment. [Agent instructions](../README.md#carrycode-agent--экспериментальная-альфа)
 
 ## Demo
 

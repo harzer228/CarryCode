@@ -261,6 +261,44 @@ pub(super) fn copy(text: &str) -> Result<()> {
     Ok(stdout.flush()?)
 }
 
+#[cfg(windows)]
+pub(super) fn paste() -> Result<Option<String>> {
+    use windows_sys::Win32::System::{
+        DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
+        Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+        Ole::CF_UNICODETEXT,
+    };
+    unsafe {
+        ensure!(
+            OpenClipboard(std::ptr::null_mut()) != 0,
+            tr!("Буфер обмена занят.", "The clipboard is busy.")
+        );
+        let result = (|| {
+            let memory = GetClipboardData(u32::from(CF_UNICODETEXT));
+            if memory.is_null() {
+                return Ok(None);
+            }
+            let length = GlobalSize(memory) / size_of::<u16>();
+            let source = GlobalLock(memory).cast::<u16>();
+            ensure!(!source.is_null(), "Clipboard memory is unavailable");
+            let units = std::slice::from_raw_parts(source, length.min(super::PASTE_LIMIT + 1));
+            let text = units
+                .iter()
+                .position(|unit| *unit == 0)
+                .map(|end| String::from_utf16_lossy(&units[..end]));
+            GlobalUnlock(memory);
+            text.map(Some).with_context(|| {
+                tr!(
+                    "Текст в буфере обмена слишком длинный.",
+                    "Clipboard text is too long."
+                )
+            })
+        })();
+        CloseClipboard();
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

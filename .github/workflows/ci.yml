@@ -124,15 +124,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          assets=(
+            dist/flashgpt-usb-amd64.zip dist/SHA256SUMS
+            dist/carrycode-lite-amd64.zip dist/SHA256SUMS-lite
+            dist/CarryCode-Lite-Setup-Windows-x64.exe dist/CarryCode-Lite-Setup-Windows-x64.exe.sha256
+            dist/CarryCode-Full-Setup-Windows-x64.exe dist/CarryCode-Full-Setup-Windows-x64.exe.sha256
+          )
+          if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$draft" == true ]]; then
+              gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+            fi
             exit 0
           fi
           flags=(--draft --verify-tag --generate-notes)
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
             flags+=(--prerelease)
           fi
-          gh release create "$GITHUB_REF_NAME" "${flags[@]}" \
-            dist/flashgpt-usb-amd64.zip dist/SHA256SUMS \
-            dist/carrycode-lite-amd64.zip dist/SHA256SUMS-lite \
-            dist/CarryCode-Lite-Setup-Windows-x64.exe dist/CarryCode-Lite-Setup-Windows-x64.exe.sha256 \
-            dist/CarryCode-Full-Setup-Windows-x64.exe dist/CarryCode-Full-Setup-Windows-x64.exe.sha256
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" "${assets[@]}"

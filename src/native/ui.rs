@@ -40,6 +40,7 @@ const MAX_CONTENT: usize = 120;
 const MENU_LIMIT: usize = 6;
 const CTX_TOKENS: u32 = 128_000;
 const INPUT_LIMIT: usize = 64 * 1024;
+const PASTE_LIMIT: usize = 192 * 1024;
 
 /// Commands offered by the slash menu. Descriptions are localized.
 fn commands() -> [(&'static str, &'static str); 22] {
@@ -349,15 +350,15 @@ impl Editor {
         if width == 0 {
             return (String::new(), 0);
         }
-        let mut start = 0;
-        while start < self.caret
-            && self.buffer[start..self.caret]
-                .iter()
-                .map(|character| editor_width(*character))
-                .sum::<usize>()
-                > width.saturating_sub(1)
-        {
-            start += 1;
+        let mut start = self.caret;
+        let mut caret = 0;
+        while let Some(&character) = start.checked_sub(1).and_then(|i| self.buffer.get(i)) {
+            let cell = editor_width(character);
+            if caret + cell >= width {
+                break;
+            }
+            caret += cell;
+            start -= 1;
         }
         let mut shown = String::new();
         let mut used = 0;
@@ -373,12 +374,13 @@ impl Editor {
             });
             used += cell;
         }
-        let caret = self.buffer[start..self.caret]
-            .iter()
-            .map(|character| editor_width(*character))
-            .sum::<usize>()
-            .min(width.saturating_sub(1));
         (shown, caret)
+    }
+
+    fn completion_prefix(&self) -> String {
+        self.buffer[self.caret.saturating_sub(512)..self.caret]
+            .iter()
+            .collect()
     }
 }
 
@@ -390,14 +392,14 @@ fn editor_width(character: char) -> usize {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Receipt {
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub(super) struct Receipt {
     input: u32,
     output: u32,
-    reasoning: u32,
+    estimated: bool,
     duration: f32,
     speed: f32,
-    ttft: f32,
+    ttft: Option<f32>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -405,9 +407,6 @@ struct Stats {
     tin: u32,
     tout: u32,
     turns: u32,
-    speed: f32,
-    lat: f32,
-    ttft: f32,
     last: Option<Receipt>,
 }
 
@@ -416,12 +415,10 @@ struct Turn {
     started: Instant,
     input: u32,
     output: u32,
-    reply_started: Option<Instant>,
+    estimated: bool,
     first: Option<Instant>,
-    chars: usize,
-    reasoning_chars: usize,
-    reasoning_output: u32,
-    seen: usize,
+    request_seconds: f32,
+    writing: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -461,10 +458,20 @@ pub struct ModelEntry {
     pub reasoning_api: super::ReasoningApi,
 }
 
+impl ModelEntry {
+    pub(super) fn missing_limits(&self) -> bool {
+        [self.context, self.input, self.output].contains(&0)
+    }
+
+    pub(super) fn validation_error(&self) -> Option<String> {
+        ModelForm::new(None, Some(self)).entry().err()
+    }
+}
+
 pub enum ModelAction {
     Activate(usize),
     Test(usize),
-    Duplicate(usize),
+    Duplicate(usize, bool),
     Catalog {
         index: Option<usize>,
         entry: ModelEntry,
@@ -489,6 +496,8 @@ pub(super) enum StreamControl {
 
 pub struct Screen {
     editor: Editor,
+    pastes: Vec<String>,
+    submitted_pastes: Vec<String>,
     notice: String,
     scroll: usize,
     details: bool,
@@ -503,7 +512,6 @@ pub struct Screen {
     tick: usize,
     turn: Option<Turn>,
     stats: Stats,
-    started: Instant,
     cache: Option<Cache>,
     context_limit: u32,
     input_limit: u32,
@@ -525,6 +533,8 @@ impl Screen {
         terminal::enable_raw_mode()?;
         let screen = Self {
             editor: Editor::new(),
+            pastes: Vec::new(),
+            submitted_pastes: Vec::new(),
             notice: String::new(),
             scroll: 0,
             details: false,
@@ -539,7 +549,6 @@ impl Screen {
             tick: 0,
             turn: None,
             stats: Stats::default(),
-            started: Instant::now(),
             cache: None,
             context_limit: CTX_TOKENS,
             input_limit: CTX_TOKENS.saturating_sub(4096),
@@ -605,10 +614,11 @@ impl Screen {
         self.permission_mode = Default::default();
         self.stats = Stats::default();
         self.turn = None;
-        self.started = Instant::now();
         self.usage = 0;
         self.notice.clear();
         self.editor.clear();
+        self.pastes.clear();
+        self.submitted_pastes.clear();
         self.queued.clear();
         self.submit_queued = false;
         self.submitted.clear();
@@ -639,7 +649,6 @@ impl Screen {
         diagnose: bool,
     ) -> Result<Option<String>> {
         self.diagnose = diagnose;
-        self.finish_turn();
         if std::mem::take(&mut self.submit_queued) {
             let line = std::mem::take(&mut self.queued);
             if line == "/status" {
@@ -690,7 +699,7 @@ impl Screen {
                         }
                         KeyCode::Enter => {
                             let line = self.editor.text().trim().to_owned();
-                            if line.is_empty() {
+                            if line.is_empty() && self.pastes.is_empty() {
                                 continue;
                             }
                             if line == "/status" {
@@ -703,14 +712,21 @@ impl Screen {
                         KeyCode::F(8) if self.desktop_active => {
                             return Ok(Some("/computer stop".into()));
                         }
+                        #[cfg(windows)]
+                        KeyCode::F(7) => self.paste_clipboard(),
+                        #[cfg(windows)]
+                        KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL => {
+                            self.paste_clipboard();
+                        }
                         KeyCode::Esc => {
                             if self.selection.take().is_some() {
                                 continue;
                             }
                             if count > 0 {
                                 self.menu_closed = true;
-                            } else if !self.editor.is_empty() {
+                            } else if !self.editor.is_empty() || !self.pastes.is_empty() {
                                 self.editor.clear();
+                                self.pastes.clear();
                                 edited = true;
                             }
                             self.armed = false;
@@ -719,8 +735,9 @@ impl Screen {
                             if self.copy_selection() {
                                 continue;
                             }
-                            if !self.editor.is_empty() {
+                            if !self.editor.is_empty() || !self.pastes.is_empty() {
                                 self.editor.clear();
+                                self.pastes.clear();
                                 edited = true;
                             } else if self.armed {
                                 return Ok(None);
@@ -729,7 +746,7 @@ impl Screen {
                             }
                         }
                         KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
-                            if self.editor.is_empty() {
+                            if self.editor.is_empty() && self.pastes.is_empty() {
                                 return Ok(None);
                             }
                         }
@@ -770,7 +787,11 @@ impl Screen {
                         KeyCode::Home => self.editor.home(),
                         KeyCode::End => self.editor.end(),
                         KeyCode::Backspace => {
-                            self.editor.backspace();
+                            if self.editor.is_empty() {
+                                self.pastes.pop();
+                            } else {
+                                self.editor.backspace();
+                            }
                             edited = true;
                         }
                         KeyCode::Delete => {
@@ -824,7 +845,7 @@ impl Screen {
                 Event::Mouse(mouse) => self.chat_mouse(mouse),
                 Event::Paste(text) => {
                     self.selection = None;
-                    self.editor.paste(&text);
+                    self.paste_prompt(&text);
                     self.selected = 0;
                     self.menu_closed = false;
                     self.nav = None;
@@ -856,6 +877,12 @@ impl Screen {
                             return Ok(StreamControl::Command("/computer stop".into()));
                         }
                         KeyCode::Esc => return Ok(StreamControl::Stop),
+                        #[cfg(windows)]
+                        KeyCode::F(7) => self.paste_clipboard(),
+                        #[cfg(windows)]
+                        KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL => {
+                            self.paste_clipboard();
+                        }
                         KeyCode::F(6) => self.permissions_menu()?,
                         KeyCode::F(2) => {
                             self.selection = None;
@@ -902,7 +929,11 @@ impl Screen {
                         KeyCode::Home => self.editor.home(),
                         KeyCode::End => self.editor.end(),
                         KeyCode::Backspace => {
-                            self.editor.backspace();
+                            if self.editor.is_empty() {
+                                self.pastes.pop();
+                            } else {
+                                self.editor.backspace();
+                            }
                             self.selected = 0;
                             self.menu_closed = false;
                         }
@@ -921,7 +952,7 @@ impl Screen {
                 }
                 Event::Mouse(mouse) => self.chat_mouse(mouse),
                 Event::Paste(text) => {
-                    self.editor.paste(&text);
+                    self.paste_prompt(&text);
                     self.selected = 0;
                     self.menu_closed = false;
                 }
@@ -933,6 +964,9 @@ impl Screen {
 
     fn submit(&mut self, line: &str) -> String {
         let line = line.to_owned();
+        if !line.starts_with('/') {
+            self.submitted_pastes = std::mem::take(&mut self.pastes);
+        }
         if self.submitted.last() != Some(&line) {
             self.submitted.push(line.clone());
         }
@@ -943,110 +977,111 @@ impl Screen {
         self.scroll = 0;
         self.armed = false;
         self.notice.clear();
-        self.begin_turn(&line);
         line
     }
 
-    fn begin_turn(&mut self, line: &str) {
-        if line.starts_with('/') {
+    pub(super) fn take_pastes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.submitted_pastes)
+    }
+
+    pub(super) fn restore_prompt(&mut self, input: &str, pastes: Vec<String>) {
+        self.editor = Editor::from(input);
+        self.pastes = pastes;
+    }
+
+    fn paste_prompt(&mut self, text: &str) {
+        if text.len() < 2048 && text.lines().take(8).count() < 8 {
+            self.editor.paste(text);
             return;
         }
-        let now = Instant::now();
+        if self.pastes.iter().map(String::len).sum::<usize>() + text.len() > PASTE_LIMIT {
+            self.notice(tr!(
+                "Вставка больше 192 КиБ. Раздели текст на части или приложи файл через @.",
+                "The paste exceeds 192 KiB. Split the text or attach a file with @."
+            ));
+            return;
+        }
+        self.pastes.push(text.to_owned());
+        self.notice.clear();
+    }
+
+    #[cfg(windows)]
+    fn paste_clipboard(&mut self) {
+        match selection::paste() {
+            Ok(Some(text)) => {
+                self.paste_prompt(&text);
+                self.selection = None;
+                self.selected = 0;
+                self.menu_closed = false;
+                self.armed = false;
+                self.nav = None;
+            }
+            Ok(None) => self.notice(tr!(
+                "В буфере обмена нет текста.",
+                "There is no text on the clipboard."
+            )),
+            Err(error) => self.notice(&error.to_string()),
+        }
+    }
+
+    pub(super) fn begin_turn(&mut self, started: Instant) {
         self.turn = Some(Turn {
-            started: now,
-            input: estimate(line.chars().count()),
+            started,
+            input: 0,
             output: 0,
-            reply_started: Some(now),
+            estimated: false,
             first: None,
-            chars: 0,
-            reasoning_chars: 0,
-            reasoning_output: 0,
-            seen: 0,
+            request_seconds: 0.0,
+            writing: false,
         });
     }
 
     pub(super) fn track(&mut self, output: &str, reasoning: &str) {
-        let Some(turn) = self.turn.as_mut() else {
-            return;
-        };
-        let seen = output.len() + reasoning.len();
-        if seen < turn.seen {
-            if turn.chars > 0 {
-                turn.output = turn.output.saturating_add(estimate(turn.chars));
+        if let Some(turn) = &mut self.turn {
+            if !output.is_empty() || !reasoning.is_empty() {
+                turn.first.get_or_insert_with(Instant::now);
             }
-            if turn.reasoning_chars > 0 {
-                turn.reasoning_output = turn
-                    .reasoning_output
-                    .saturating_add(estimate(turn.reasoning_chars));
-            }
-            turn.reply_started = Some(Instant::now());
-            turn.first = None;
-            turn.chars = 0;
-            turn.reasoning_chars = 0;
+            turn.writing = !output.is_empty();
         }
-        turn.seen = seen;
-        if seen == 0 {
-            return;
-        }
-        let now = Instant::now();
-        if turn.reply_started.is_none() {
-            turn.reply_started = Some(now);
-        }
-        if !output.is_empty() && turn.first.is_none() {
-            turn.first = Some(now);
-        }
-        turn.chars = output.chars().count() + reasoning.chars().count();
-        turn.reasoning_chars = reasoning.chars().count();
     }
 
-    fn finish_turn(&mut self) {
-        let Some(turn) = self.turn.take() else {
-            return;
-        };
-        let mut output = turn.output;
-        if turn.chars > 0 {
-            output = output.saturating_add(estimate(turn.chars));
+    pub(super) fn record_reply(&mut self, input: u32, output: u32, estimated: bool, elapsed: f32) {
+        if let Some(turn) = &mut self.turn {
+            turn.input = turn.input.saturating_add(input);
+            turn.output = turn.output.saturating_add(output);
+            turn.estimated |= estimated;
+            turn.request_seconds += elapsed;
+            turn.writing = false;
         }
-        let mut reasoning = turn.reasoning_output;
-        if turn.reasoning_chars > 0 {
-            reasoning = reasoning.saturating_add(estimate(turn.reasoning_chars));
-        }
-        if output == 0 {
-            return;
-        }
-        let duration = turn
-            .reply_started
-            .map_or(0., |start| start.elapsed().as_secs_f32());
-        let ttft = match (turn.reply_started, turn.first) {
-            (Some(start), Some(first)) => first.saturating_duration_since(start).as_secs_f32(),
-            _ => duration,
-        };
-        let speed = if duration > ttft {
-            output as f32 / (duration - ttft).max(0.05)
-        } else {
-            0.
-        };
+    }
+
+    pub(super) fn finish_turn(&mut self) -> Option<Receipt> {
+        let turn = self.turn.take()?;
+        let duration = turn.started.elapsed().as_secs_f32();
+        let speed = turn.output as f32 / turn.request_seconds.max(0.05);
+        let ttft = turn
+            .first
+            .map(|first| first.duration_since(turn.started).as_secs_f32());
         self.stats.tin = self.stats.tin.saturating_add(turn.input);
-        self.stats.tout = self.stats.tout.saturating_add(output);
+        self.stats.tout = self.stats.tout.saturating_add(turn.output);
         self.stats.turns = self.stats.turns.saturating_add(1);
-        self.stats.speed = speed;
-        self.stats.lat = duration;
-        self.stats.ttft = ttft;
-        self.stats.last = Some(Receipt {
+        let receipt = Receipt {
             input: turn.input,
-            output,
-            reasoning,
+            output: turn.output,
+            estimated: turn.estimated,
             duration,
             speed,
             ttft,
-        });
+        };
+        self.stats.last = Some(receipt);
+        Some(receipt)
     }
 
     fn menu(&self, directory: &Path) -> Vec<(String, &'static str)> {
-        let prefix = self.editor.prefix();
         if self.menu_closed || self.nav.is_some() {
             return Vec::new();
         }
+        let prefix = self.editor.completion_prefix();
         if let Some(query) = super::attachment_prefix(&prefix) {
             return super::attachment_choices(directory, query);
         }
@@ -1057,7 +1092,7 @@ impl Screen {
     }
 
     fn complete(&mut self, item: &str) -> Option<String> {
-        let prefix = self.editor.prefix();
+        let prefix = self.editor.completion_prefix();
         if item.starts_with('@') {
             if let Some(query) = super::attachment_prefix(&prefix) {
                 self.editor.replace_tail(query.chars().count() + 1, item);
@@ -1170,13 +1205,22 @@ impl Screen {
         self.header(&mut out, margin, content, model, directory, show_mark)?;
 
         let streaming = pending.is_some();
+        let notice = if self.notice.is_empty() && !self.pastes.is_empty() {
+            super::paste_label(
+                self.pastes
+                    .iter()
+                    .map(|text| text.lines().count().max(1))
+                    .sum(),
+            )
+        } else {
+            self.notice.clone()
+        };
         let menu = self.menu(directory);
         let mut menu_rows = menu.len().clamp(1, MENU_LIMIT);
         menu_rows = menu_rows.min(height.saturating_sub(header_height + 7).max(1));
-        let mut receipt_rows = usize::from(!streaming && self.stats.last.is_some());
-        let mut notice_rows = usize::from(!self.notice.is_empty());
+        let mut notice_rows = usize::from(!notice.is_empty());
         let mut gap_rows = 1usize;
-        let (conv_rows, receipt_y, notice_y, box_top) = loop {
+        let (conv_rows, notice_y, box_top) = loop {
             let top = height.saturating_sub(3 + menu_rows);
             let gap = gap_rows.min(top.saturating_sub(header_height + 2));
             let extras_end = top.saturating_sub(gap);
@@ -1185,22 +1229,13 @@ impl Screen {
             } else {
                 None
             };
-            let receipt = if receipt_rows > 0 {
-                Some(notice.unwrap_or(extras_end).saturating_sub(receipt_rows))
-            } else {
-                None
-            };
-            let conv_end = receipt.or(notice).unwrap_or(extras_end);
+            let conv_end = notice.unwrap_or(extras_end);
             let rows = conv_end.saturating_sub(header_height);
             if rows >= 2 {
-                break (rows, receipt, notice, top);
+                break (rows, notice, top);
             }
             if notice_rows > 0 {
                 notice_rows = 0;
-                continue;
-            }
-            if receipt_rows > 0 {
-                receipt_rows = 0;
                 continue;
             }
             if gap_rows > 0 {
@@ -1211,7 +1246,7 @@ impl Screen {
                 menu_rows -= 1;
                 continue;
             }
-            break (rows, receipt, notice, top);
+            break (rows, notice, top);
         };
 
         if conv_rows > 0 {
@@ -1308,25 +1343,20 @@ impl Screen {
         }
 
         if let Some(y) = notice_y {
-            let mut line = Line::of(format!("  {}", self.notice), Style::dim());
+            let mut line = Line::of(
+                format!("  {notice}"),
+                if self.notice.is_empty() {
+                    Style::fg(render::WARN)
+                } else {
+                    Style::dim()
+                },
+            );
             if line.width() > content {
                 line = line.truncate(content.saturating_sub(1));
                 line.push("…", Style::dim());
             }
             put_line(&mut out, margin, y, &line, content)?;
         }
-        if let Some(y) = receipt_y
-            && let Some(receipt) = self.stats.last
-        {
-            put_line(
-                &mut out,
-                margin,
-                y,
-                &receipt_line(receipt, content),
-                content,
-            )?;
-        }
-
         let inner = content.saturating_sub(6);
         let (text, caret) = self.editor.view(inner);
         let border = Style::fg(render::LINE);
@@ -1551,32 +1581,9 @@ impl Screen {
                 Style::dim(),
             ));
         }
-        if self.stats.tin > 0 || self.stats.tout > 0 {
-            segments.push(Line::of(
-                format!(
-                    "↑{} ↓{}",
-                    render::human(self.stats.tin),
-                    render::human(self.stats.tout)
-                ),
-                Style::dim(),
-            ));
-        }
-        if self.stats.speed > 0. {
-            segments.push(Line::of(
-                format!("{:.0} tok/s", self.stats.speed),
-                Style::dim(),
-            ));
-        }
-        if self.stats.lat > 0. {
-            segments.push(Line::of(format!("{:.1}s", self.stats.lat), Style::dim()));
-        }
         if self.scroll > 0 {
             segments.push(Line::of(format!("↑{}", self.scroll), Style::dim()));
         }
-        segments.push(Line::of(
-            format!("session {}", render::dur(self.started.elapsed().as_secs())),
-            Style::dim(),
-        ));
         join_segments(&segments, width)
     }
 
@@ -1585,46 +1592,27 @@ impl Screen {
         let Some(turn) = self.turn else {
             return Line::of("  Thinking…", Style::brand());
         };
-        let elapsed = turn
-            .reply_started
-            .unwrap_or(turn.started)
-            .elapsed()
-            .as_secs_f32();
-        let tokens = estimate(turn.chars);
-        let stage = if turn.first.is_some() {
-            tr!("Writing", "Writing")
+        let elapsed = render::dur(turn.started.elapsed().as_secs());
+        let stage = if turn.writing {
+            tr!("Пишу", "Writing")
         } else {
-            tr!("Thinking", "Thinking")
+            tr!("Думаю", "Thinking")
         };
         if width < 58 {
             let mut line = Line::new();
             line.push("  ", Style::plain());
             line.push(frame, Style::brand());
-            line.push(
-                format!(" {stage}… {elapsed:.0}s · ↓ {tokens} · esc"),
-                Style::dim(),
-            );
+            line.push(format!(" {stage}… {elapsed} · Esc"), Style::dim());
             return line.truncate(width);
         }
-        let rate = match turn.first {
-            Some(first) => {
-                let since = first.elapsed().as_secs_f32();
-                if since > 0.4 && tokens > 0 {
-                    format!(" · {:.0} tok/s", tokens as f32 / since)
-                } else {
-                    String::new()
-                }
-            }
-            None => String::new(),
-        };
         let mut line = Line::new();
         line.push("  ", Style::plain());
         line.push(frame, Style::brand());
         line.push(format!(" {stage}…"), Style::brand());
         line.push(
             trf!(
-                " ({elapsed:.0}s · ↓ {tokens} tokens{rate} · esc — прервать)",
-                " ({elapsed:.0}s · ↓ {tokens} tokens{rate} · esc to interrupt)"
+                " ({elapsed} · Esc — прервать)",
+                " ({elapsed} · Esc to interrupt)"
             ),
             Style::dim(),
         );
@@ -1675,28 +1663,19 @@ impl Screen {
             ),
             (
                 tr!("скорость", "speed"),
-                format!(
-                    "{:.0} tok/s ({})",
-                    self.stats.speed,
-                    tr!("последний ответ", "last reply")
-                ),
+                self.stats
+                    .last
+                    .map_or("—".into(), |reply| format!("{:.0} tok/s", reply.speed)),
             ),
             (
                 tr!("последний", "last"),
-                format!(
-                    "{:.1}s · {} {:.1}s",
-                    self.stats.lat,
-                    tr!("первый токен", "first token"),
-                    self.stats.ttft
-                ),
+                self.stats
+                    .last
+                    .map_or("—".into(), |reply| format!("{:.1}s", reply.duration)),
             ),
             (
                 tr!("сеанс", "session"),
-                format!(
-                    "{} · {}",
-                    render::dur(self.started.elapsed().as_secs()),
-                    trf!("{} запросов", "{} turns", self.stats.turns)
-                ),
+                trf!("{} запросов", "{} turns", self.stats.turns),
             ),
             (tr!("режим", "mode"), mode.to_owned()),
             (tr!("проект", "project"), crate::folders::display(directory)),
@@ -1993,27 +1972,19 @@ struct ModelForm {
 impl ModelForm {
     fn new(index: Option<usize>, entry: Option<&ModelEntry>) -> Self {
         let field = |value: &str| Editor::from(value);
+        let limit = |value: Option<u32>| match value.filter(|value| *value != 0) {
+            Some(value) => Editor::from(&value.to_string()),
+            None => Editor::new(),
+        };
         Self {
             index,
             name: field(entry.map(|entry| entry.name.as_str()).unwrap_or("")),
             url: field(entry.map(|entry| entry.url.as_str()).unwrap_or("")),
             model: field(entry.map(|entry| entry.model.as_str()).unwrap_or("")),
             key: field(entry.and_then(|entry| entry.key.as_deref()).unwrap_or("")),
-            context: field(
-                &entry
-                    .map(|entry| entry.context.max(1_000).to_string())
-                    .unwrap_or_else(|| CTX_TOKENS.to_string()),
-            ),
-            input: field(
-                &entry
-                    .map(|entry| entry.input.to_string())
-                    .unwrap_or_else(|| CTX_TOKENS.saturating_sub(4096).to_string()),
-            ),
-            output: field(
-                &entry
-                    .map(|entry| entry.output.to_string())
-                    .unwrap_or_else(|| 4096.to_string()),
-            ),
+            context: limit(entry.map(|entry| entry.context)),
+            input: limit(entry.map(|entry| entry.input)),
+            output: limit(entry.map(|entry| entry.output)),
             anthropic: entry.map(|entry| entry.anthropic).unwrap_or(false),
             responses: entry.is_some_and(|entry| entry.responses),
             vision: entry.is_some_and(|entry| entry.vision),
@@ -2119,38 +2090,23 @@ impl ModelForm {
             )
             .to_owned());
         }
-        let context: u32 =
-            self.context.text().trim().parse().map_err(|_| {
-                tr!("Контекст — целое число", "Context must be an integer").to_owned()
-            })?;
-        if !(1_000..=10_000_000).contains(&context) {
-            return Err(tr!(
-                "Контекст: от 1000 до 10 000 000 токенов",
-                "Context: 1000 to 10,000,000 tokens"
-            )
-            .to_owned());
-        }
-        let input: u32 = self.input.text().trim().parse().map_err(|_| {
-            tr!("Вход — целое число токенов", "Input must be an integer").to_owned()
-        })?;
-        if !(1_000..=context).contains(&input) {
-            return Err(tr!(
-                "Вход: от 1000 до размера контекста",
-                "Input: 1000 up to the context size"
-            )
-            .to_owned());
-        }
-        let output: u32 = self.output.text().trim().parse().map_err(|_| {
-            tr!("Выход — целое число токенов", "Output must be an integer").to_owned()
-        })?;
-        if !(256..=context).contains(&output) {
-            return Err(tr!(
-                "Выход: от 256 до размера контекста",
-                "Output: 256 up to the context size"
-            )
-            .to_owned());
-        }
-        if input.saturating_add(output) > context {
+        let limit = |editor: &Editor, name: &str, minimum: u32| {
+            if editor.is_empty() {
+                return Ok(0);
+            }
+            editor.text().trim().parse::<u32>()
+                .ok()
+                .filter(|value| (minimum..=10_000_000).contains(value))
+                .ok_or_else(|| trf!(
+                    "{}: укажи целое число от {} до 10 000 000 или оставь поле пустым для авто.",
+                    "{}: enter an integer from {} to 10,000,000 or leave blank for auto.",
+                    name, minimum,
+                ))
+        };
+        let context = limit(&self.context, tr!("Контекст", "Context"), 1256)?;
+        let input = limit(&self.input, tr!("Вход", "Input"), 1000)?;
+        let output = limit(&self.output, tr!("Выход", "Output"), 256)?;
+        if context > 0 && input.saturating_add(output) > context {
             return Err(tr!(
                 "Вход + выход больше окна контекста",
                 "Input + output exceed the context window"
@@ -2166,6 +2122,7 @@ impl ModelForm {
                     | super::ReasoningApi::DeepSeek
             )
             && let Some(budget) = self.reasoning.budget()
+            && output > 0
             && output <= budget
         {
             return Err(trf!(
@@ -2339,7 +2296,7 @@ impl ModelForm {
             &mut lines,
             Field::Output,
             tr!("Выход", "Output"),
-            tr!("лимит ответа, токены", "reply limit, tokens"),
+            tr!("авто · лимит ответа", "auto · reply limit"),
             &self.output,
         ) {
             cursor = Some(position);
@@ -2443,6 +2400,13 @@ fn model_lines(
         ));
         return lines;
     }
+    lines.push(Line::of(
+        tr!(
+            "  A  Добавить · N  На том же API · F4  Каталог",
+            "  A  Add model · N  Same connection · F4  Catalog"
+        ),
+        Style::brand(),
+    ));
     for (index, entry) in entries.iter().enumerate() {
         let is_selected = index == selected;
         let mut line = Line::new();
@@ -2620,10 +2584,20 @@ impl Screen {
         &mut self,
         entries: &[ModelEntry],
         active: Option<usize>,
-        draft: Option<(Option<usize>, ModelEntry)>,
+        draft: Option<(Option<usize>, ModelEntry, Option<String>)>,
     ) -> Result<ModelAction> {
         let mut selected = active.unwrap_or(0).min(entries.len().saturating_sub(1));
-        let mut form = draft.map(|(index, entry)| ModelForm::new(index, Some(&entry)));
+        let mut form = draft.map(|(index, entry, error)| {
+            let mut form = ModelForm::new(index, Some(&entry));
+            if error.is_some() {
+                form.focus = [entry.context, entry.input, entry.output]
+                    .iter()
+                    .position(|value| *value == 0)
+                    .map_or(5, |index| 5 + index);
+                form.error = error;
+            }
+            form
+        });
         let mut error: Option<String> = None;
         let mut form_scroll = 0usize;
         loop {
@@ -2661,11 +2635,14 @@ impl Screen {
                     tr!("Модели", "Models"),
                     if term_width >= 72 {
                         tr!(
-                            " E изменить · D удалить · Enter выбрать · A добавить · N копия · T тест · F5 авто ",
-                            " E edit · D delete · Enter select · A add · N copy · T test · F5 setup "
+                            " E изменить · D удалить · Enter выбрать · A новая · N на том же API · T тест · F5 авто ",
+                            " E edit · D delete · Enter select · A add · N same API · T test · F5 setup "
                         )
                     } else {
-                        tr!(" E изменить · D удалить ", " E edit · D delete ")
+                        tr!(
+                            " A добавить · N ещё · E правка ",
+                            " A add · N another · E edit "
+                        )
                     },
                     model_lines(entries, selected, active, error.as_deref()),
                     None,
@@ -2684,7 +2661,7 @@ impl Screen {
                 form_scroll = form_scroll.min(body.len().saturating_sub(visible));
             } else {
                 let visible = usize::from(terminal::size()?.1).saturating_sub(4);
-                let list_top = selected.saturating_mul(3);
+                let list_top = if selected == 0 { 0 } else { 1 + selected * 3 };
                 if list_top < form_scroll {
                     form_scroll = list_top;
                 } else if list_top + 1 >= form_scroll.saturating_add(visible) {
@@ -2724,6 +2701,12 @@ impl Screen {
                                 Err(message) => form.error = Some(message),
                             },
                             KeyCode::Enter => match form.entry() {
+                                Ok(entry) if entry.missing_limits() => {
+                                    return Ok(ModelAction::Auto {
+                                        index: form.index,
+                                        entry,
+                                    });
+                                }
                                 Ok(entry) => {
                                     return Ok(ModelAction::Save {
                                         index: form.index,
@@ -2835,11 +2818,14 @@ impl Screen {
                                     entry: entries[selected].clone(),
                                 });
                             }
+                            KeyCode::F(4) if !entries.is_empty() => {
+                                return Ok(ModelAction::Duplicate(selected, true));
+                            }
                             KeyCode::Char('t') if !entries.is_empty() => {
                                 return Ok(ModelAction::Test(selected));
                             }
                             KeyCode::Char('n') | KeyCode::Char('т') if !entries.is_empty() => {
-                                return Ok(ModelAction::Duplicate(selected));
+                                return Ok(ModelAction::Duplicate(selected, false));
                             }
                             KeyCode::Char('a') | KeyCode::Char('а') | KeyCode::Char('ф') => {
                                 error = None;
@@ -3829,26 +3815,23 @@ fn receipt_line(receipt: Receipt, width: usize) -> Line {
     let mut line = Line::new();
     line.push("  ", Style::plain());
     line.push("╰─ ", Style::dim());
-    line.push(
-        format!(
-            "↑ ~{} ↓ ~{} tokens",
+    line.push(format!("{:.1}s", receipt.duration), Style::dim());
+    let approx = if receipt.estimated { "~" } else { "" };
+    let extras = [
+        Some(trf!(
+            "↑{}{} ↓{}{} токенов",
+            "↑{}{} ↓{}{} tokens",
+            approx,
             render::human(receipt.input),
+            approx,
             render::human(receipt.output)
-        ),
-        Style::dim(),
-    );
-    let mut extras = Vec::new();
-    if receipt.reasoning > 0 {
-        extras.push(format!("r ~{}", render::human(receipt.reasoning)));
-    }
-    extras.push(format!("{:.1}s", receipt.duration));
-    extras.push(format!("{:.0} tok/s", receipt.speed));
-    extras.push(format!(
-        "{} {:.1}s",
-        tr!("первый токен", "first token"),
-        receipt.ttft
-    ));
-    for extra in extras {
+        )),
+        (receipt.speed > 0.0).then(|| format!("{approx}{:.0} tok/s", receipt.speed)),
+        receipt
+            .ttft
+            .map(|seconds| trf!("первый токен {:.1}s", "first token {:.1}s", seconds)),
+    ];
+    for extra in extras.into_iter().flatten() {
         let piece = Line::of(format!(" · {extra}"), Style::dim());
         if line.width().saturating_add(piece.width()) > width {
             break;
@@ -3973,7 +3956,13 @@ fn history_lines(
         } else if message.content.starts_with("Tool result") {
             lines.extend(tool_lines(&message.content, width, details));
         } else {
-            lines.extend(render::user(&message.content, width));
+            lines.extend(render::user(
+                message.display.as_deref().unwrap_or(&message.content),
+                width,
+            ));
+        }
+        if let Some(receipt) = message.receipt {
+            lines.push(receipt_line(receipt, width));
         }
         lines.push(Line::new());
     }
@@ -4143,6 +4132,8 @@ mod tests {
     fn tool_turns_count_every_streamed_reply() {
         let mut screen = Screen {
             editor: Editor::new(),
+            pastes: Vec::new(),
+            submitted_pastes: Vec::new(),
             notice: String::new(),
             scroll: 0,
             details: false,
@@ -4157,7 +4148,6 @@ mod tests {
             tick: 0,
             turn: None,
             stats: Stats::default(),
-            started: Instant::now(),
             cache: None,
             context_limit: CTX_TOKENS,
             input_limit: CTX_TOKENS.saturating_sub(4096),
@@ -4173,20 +4163,26 @@ mod tests {
             permission_mode: crate::native::permissions::Mode::Ask,
             approval_card: false,
         };
-        screen.begin_turn("prompt");
-        screen.track("первый ответ", "");
-        screen.track("", "");
-        screen.track("второй ответ", "");
-        screen.finish_turn();
+        screen.begin_turn(Instant::now() - Duration::from_secs(2));
+        screen.track("first", "");
+        screen.record_reply(100, 10, false, 0.1);
+        screen.track("second", "");
+        screen.record_reply(200, 20, true, 0.1);
+        let _ = screen.finish_turn();
         let receipt = screen.stats.last.expect("receipt");
-        assert_eq!(
-            receipt.output,
-            estimate("первый ответ".chars().count()) + estimate("второй ответ".chars().count())
-        );
+        assert_eq!(receipt.input, 300);
+        assert_eq!(receipt.output, 30);
+        assert!(receipt.duration >= 2.0 && receipt.estimated);
         assert_eq!(screen.stats.turns, 1);
         screen.stage_input("old draft".to_owned());
         screen.set_usage(500);
         screen.reset_conversation();
+        screen.paste_prompt(&"draft line\n".repeat(60));
+        assert!(screen.editor.is_empty() && screen.turn.is_none());
+        assert_eq!(screen.pastes.len(), 1);
+        assert_eq!(screen.submit(""), "");
+        assert_eq!(screen.take_pastes()[0].lines().count(), 60);
+        assert!(screen.pastes.is_empty() && screen.turn.is_none());
         assert!(screen.permission_mode() == crate::native::permissions::Mode::Auto);
         assert!(screen.stats.last.is_none());
         assert_eq!(screen.stats.turns, 0);
@@ -4201,6 +4197,7 @@ mod tests {
             role: "user".into(),
             content: "Tool result (untrusted file content)\nfn agent() {}".into(),
             reasoning: None,
+            ..Default::default()
         };
         let compact = history_lines(std::slice::from_ref(&message), 60, false, false);
         let full = history_lines(std::slice::from_ref(&message), 60, true, false);
@@ -4297,6 +4294,7 @@ mod tests {
             role: "assistant".into(),
             content: "answer".into(),
             reasoning: Some("one\ntwo\nthree\nfour".into()),
+            ..Default::default()
         };
         let compact = history_lines(std::slice::from_ref(&message), 60, false, false);
         let full = history_lines(std::slice::from_ref(&message), 60, false, true);

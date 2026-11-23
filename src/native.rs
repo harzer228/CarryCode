@@ -201,6 +201,10 @@ struct Message {
     content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    receipt: Option<ui::Receipt>,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct State {
@@ -340,7 +344,7 @@ fn apply_model_action(state: &mut State, action: ui::ModelAction) -> Result<bool
     match action {
         ui::ModelAction::Close => Ok(false),
         ui::ModelAction::Test(_)
-        | ui::ModelAction::Duplicate(_)
+        | ui::ModelAction::Duplicate(..)
         | ui::ModelAction::Auto { .. }
         | ui::ModelAction::Catalog { .. } => Ok(false),
         ui::ModelAction::Activate(index) => {
@@ -668,6 +672,7 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
         let Some(input) = screen.input(&history, &label, directory, diagnose)? else {
             break;
         };
+        let submitted_at = std::time::Instant::now();
         let command = input.trim_end();
         match command {
             "/quit" | "/exit" => break,
@@ -1112,26 +1117,29 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
             continue;
         }
         let continuing = command == "/continue";
-        let content = if let Some(skill_request) = input.strip_prefix("/skill ") {
+        let pastes = screen.take_pastes();
+        let (content, display) = if let Some(skill_request) = input.strip_prefix("/skill ") {
             let (name, task) = skill_request.split_once(' ').unwrap_or((skill_request, ""));
             let Some(skill) = skills.find(name) else {
                 screen.notice(tr!("Скилл не найден.", "Skill not found."));
                 continue;
             };
             match skills::body(skill) {
-                Ok(guide) => {
-                    format!("Use the {name} skill. Task: {task}\n\nSkill instructions:\n{guide}")
-                }
+                Ok(guide) => (
+                    format!("Use the {name} skill. Task: {task}\n\nSkill instructions:\n{guide}"),
+                    Some(input.clone()),
+                ),
                 Err(error) => {
                     screen.notice(&error.to_string());
                     continue;
                 }
             }
         } else {
-            match attach_files(directory, &input) {
-                Ok(content) => content,
+            match attach_files(directory, &input, &pastes) {
+                Ok(message) => message,
                 Err(error) => {
                     chat_error(&mut history, tr!("Вложение", "Attachment"), error);
+                    screen.restore_prompt(&input, pastes);
                     continue;
                 }
             }
@@ -1141,12 +1149,17 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                 role: "user".into(),
                 content,
                 reasoning: None,
+                display,
+                ..Default::default()
             });
         }
         resume_turn = false;
+        screen.begin_turn(submitted_at);
         let turn_provider = state.provider.as_ref().unwrap().clone();
         let mut model_changed = false;
-        for step in 0..24 {
+        let mut step = 0;
+        let mut stream_retries = 0;
+        while step < 24 {
             let provider = turn_provider.clone();
             let messages = history.clone();
             let extra = format!(
@@ -1179,15 +1192,17 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                     }
                 }
             }
-            for screenshot in std::mem::take(&mut images) {
-                attach_image(&provider, &mut plan.body, &screenshot);
+            for screenshot in &images {
+                attach_image(&provider, &mut plan.body, screenshot);
             }
             screen.set_usage(plan.input_tokens);
+            let input_tokens = plan.input_tokens;
             let canceled = Arc::new(AtomicBool::new(false));
             let cancel = canceled.clone();
             let (sender, receiver) = mpsc::channel::<Delta>();
             let vision = provider.vision;
             let chat_only = provider.chat_only;
+            let reply_started = std::time::Instant::now();
             let task = std::thread::spawn(move || request(&provider, &plan, &cancel, sender));
             screen.track("", "");
             let mut output = String::new();
@@ -1283,6 +1298,7 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
             }
             screen.track(&output, &reasoning);
             if canceled.load(Ordering::Relaxed) {
+                images.clear();
                 let partial = output.trim_start();
                 let tool_text = (partial.starts_with('{') || partial.starts_with("```json"))
                     && partial.contains("\"action\"");
@@ -1291,6 +1307,7 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                         role: "interrupted".into(),
                         content: output,
                         reasoning: None,
+                        ..Default::default()
                     });
                 }
                 screen.notice(tr!("Остановлено.", "Stopped."));
@@ -1302,14 +1319,55 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
             let answer = match response {
                 Ok(value) => value,
                 Err(error) => {
+                    let estimated = (output.len() + reasoning.len()).div_ceil(4) as u32;
+                    screen.record_reply(
+                        input_tokens,
+                        estimated,
+                        true,
+                        reply_started.elapsed().as_secs_f32(),
+                    );
+                    let interrupted = error.is::<InterruptedStream>();
+                    if interrupted && stream_retries == 0 {
+                        stream_retries += 1;
+                        screen.notice(tr!(
+                            "Поток оборвался. Повторяю текущий запрос…",
+                            "The stream disconnected. Retrying the current request…"
+                        ));
+                        continue;
+                    }
+                    images.clear();
                     chat_error(
                         &mut history,
                         tr!("Ошибка провайдера", "Provider error"),
                         error,
                     );
+                    resume_turn = true;
+                    screen.notice(tr!(
+                        "Введи /continue, чтобы продолжить с текущего шага.",
+                        "Enter /continue to resume from the current step."
+                    ));
                     break;
                 }
             };
+            if stream_retries > 0 {
+                screen.notice("");
+                stream_retries = 0;
+            }
+            images.clear();
+            let output_tokens = (answer.content.len()
+                + reasoning.len().max(answer.raw_reasoning.len())
+                + answer
+                    .calls
+                    .iter()
+                    .map(|call| call.arguments.len())
+                    .sum::<usize>())
+            .div_ceil(4) as u32;
+            screen.record_reply(
+                answer.usage.input.unwrap_or(input_tokens),
+                answer.usage.output.unwrap_or(output_tokens),
+                answer.usage.input.is_none() || answer.usage.output.is_none(),
+                reply_started.elapsed().as_secs_f32(),
+            );
             let native = !answer.calls.is_empty() && !chat_only;
             let mut reasoning = answer.reasoning.clone();
             if !native || !answer.content.is_empty() {
@@ -1319,8 +1377,10 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                     role: if native { "narration" } else { "assistant" }.into(),
                     content: answer.content.clone(),
                     reasoning: reasoning.take(),
+                    ..Default::default()
                 });
                 if !native && !fallback {
+                    history[index].receipt = screen.finish_turn();
                     if !answer.raw_reasoning.is_empty() {
                         wire.insert(index, answer);
                     }
@@ -1351,6 +1411,7 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                         role: "assistant".into(),
                         content: arguments.clone(),
                         reasoning: reasoning.take(),
+                        ..Default::default()
                     });
                 }
                 if canceled_web_request {
@@ -1358,6 +1419,7 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                         role: "user".into(),
                         content: "Tool result\nSkipped because the user stopped this turn".into(),
                         reasoning: None,
+                        ..Default::default()
                     });
                     continue;
                 }
@@ -1372,6 +1434,7 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                             role: "user".into(),
                             content: format!("Tool result\n{text}"),
                             reasoning: None,
+                            ..Default::default()
                         });
                         continue;
                     }
@@ -1434,6 +1497,7 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                                 role: "permission".into(),
                                 content: format!("{text}\n{}", field(&action, "reason").trim()),
                                 reasoning: None,
+                                ..Default::default()
                             });
                         }
                         result
@@ -1870,12 +1934,14 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                             content
                         ),
                         reasoning: None,
+                        ..Default::default()
                     });
                 }
                 history.push(Message {
                     role: "user".into(),
                     content: format!("{prefix}\n{content}"),
                     reasoning: None,
+                    ..Default::default()
                 });
             }
             if native {
@@ -1889,7 +1955,8 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                 screen.notice(tr!("Веб-запрос отменён.", "Web request canceled."));
                 break;
             }
-            if step == 23 {
+            step += 1;
+            if step == 24 {
                 resume_turn = true;
                 screen.notice(tr!(
                     "Введи /continue для следующего этапа.",
@@ -1897,6 +1964,7 @@ pub fn run(profile: &mut crate::profile::Profile, root: &Path, directory: &Path)
                 ));
             }
         }
+        let _ = screen.finish_turn();
         if model_changed {
             wire.clear();
             images.clear();
@@ -2194,7 +2262,11 @@ fn attachment_choices(root: &Path, query: &str) -> Vec<(String, &'static str)> {
         .collect()
 }
 
-fn attach_files(root: &Path, input: &str) -> Result<String> {
+pub(super) fn paste_label(lines: usize) -> String {
+    trf!("[Вставка · ~{} строк]", "[Pasted ~{} lines]", lines)
+}
+
+fn attach_files(root: &Path, input: &str, pastes: &[String]) -> Result<(String, Option<String>)> {
     let mut output = input.to_owned();
     let mut remainder = input;
     let mut paths = std::collections::BTreeSet::new();
@@ -2214,10 +2286,34 @@ fn attach_files(root: &Path, input: &str) -> Result<String> {
         remainder = rest;
         if !path.is_empty() && paths.insert(path) {
             let text = read_file(root, path)?;
+            ensure!(
+                output.len() + path.len() + text.len() <= 512 * 1024,
+                tr!("Вложения превышают 512 КиБ.", "Attachments exceed 512 KiB.")
+            );
             output.push_str(&format!("\n\nFile {path}\n{text}"));
         }
     }
-    Ok(output)
+    let mut display = if input.len() >= 2048 || input.lines().take(8).count() == 8 {
+        paste_label(input.lines().count().max(1))
+    } else {
+        input.to_owned()
+    };
+    for (index, text) in pastes.iter().enumerate() {
+        output.push_str(&format!("\n\nPasted text {}\n{text}", index + 1));
+        if !display.is_empty() {
+            display.push('\n');
+        }
+        display.push_str(&paste_label(text.lines().count().max(1)));
+    }
+    ensure!(
+        output.len() <= 512 * 1024,
+        tr!(
+            "Сообщение и вложения превышают 512 КиБ.",
+            "The message and attachments exceed 512 KiB."
+        )
+    );
+    let display = (display != output).then_some(display);
+    Ok((output, display))
 }
 
 fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
@@ -2504,7 +2600,45 @@ struct Reply {
     raw_reasoning: String,
     calls: Vec<ToolCall>,
     wire_blocks: Vec<Value>,
+    usage: Usage,
 }
+
+#[derive(Debug, Default)]
+struct Usage {
+    input: Option<u32>,
+    output: Option<u32>,
+}
+
+impl Usage {
+    fn update(&mut self, value: &Value) {
+        let number = |name| value[name].as_u64().and_then(|n| u32::try_from(n).ok());
+        self.input = number("input_tokens")
+            .or_else(|| number("prompt_tokens"))
+            .map(|tokens| {
+                tokens
+                    .saturating_add(number("cache_creation_input_tokens").unwrap_or_default())
+                    .saturating_add(number("cache_read_input_tokens").unwrap_or_default())
+            })
+            .or(self.input);
+        self.output = number("output_tokens")
+            .or_else(|| number("completion_tokens"))
+            .or(self.output);
+    }
+}
+
+#[derive(Debug)]
+struct InterruptedStream;
+
+impl std::fmt::Display for InterruptedStream {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(tr!(
+            "Поток ответа провайдера оборвался.",
+            "The provider's response stream disconnected."
+        ))
+    }
+}
+
+impl std::error::Error for InterruptedStream {}
 
 #[derive(Debug, Default)]
 struct ToolCall {
@@ -2597,6 +2731,7 @@ fn chat_error(history: &mut Vec<Message>, title: &str, error: impl std::fmt::Dis
         role: "error".into(),
         content: format!("{title}\n{error}"),
         reasoning: None,
+        ..Default::default()
     });
 }
 
@@ -2934,6 +3069,18 @@ fn provider_transport_error(error: ureq::Error, key: &str) -> anyhow::Error {
     }
 }
 
+fn provider_stream_closed(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "unexpected eof",
+        "eof while parsing",
+        "tls close_notify",
+        "connection reset",
+    ]
+    .iter()
+    .any(|reason| detail.contains(reason))
+}
+
 fn request(
     provider: &Provider,
     plan: &RequestPlan,
@@ -2958,9 +3105,12 @@ fn request(
     }
     let response = request
         .send_string(&plan.body.to_string())
-        .map_err(|error| provider_transport_error(error, &provider.key))?;
+        .map_err(|error| match error {
+            ureq::Error::Status(502..=504, _) => InterruptedStream.into(),
+            error => provider_transport_error(error, &provider.key),
+        })?;
     decode_stream_mode(
-        BufReader::new(response.into_reader().take(2 * 1024 * 1024)),
+        BufReader::new(response.into_reader().take(16 * 1024 * 1024)),
         provider.anthropic,
         provider.responses,
         canceled,
@@ -2968,7 +3118,7 @@ fn request(
     )
     .map_err(|error| {
         let detail = error.to_string();
-        if provider.key.is_empty() {
+        if error.is::<InterruptedStream>() || provider.key.is_empty() {
             error
         } else {
             anyhow::anyhow!("{}", detail.replace(&provider.key, "<key>"))
@@ -3012,12 +3162,13 @@ fn decode_stream_mode(
 ) -> Result<Reply> {
     let mut output = String::new();
     let mut reasoning = String::new();
-    let mut line = String::new();
+    let mut line = Vec::new();
     let started = std::time::Instant::now();
     let mut complete = false;
     let mut raw_reasoning = String::new();
     let mut tools = std::collections::BTreeMap::<u64, ToolCall>::new();
     let mut wire_blocks = std::collections::BTreeMap::<u64, Value>::new();
+    let mut usage = Usage::default();
     loop {
         if canceled.load(Ordering::Relaxed) {
             bail!("Canceled");
@@ -3027,9 +3178,31 @@ fn decode_stream_mode(
             "Provider response exceeded five minutes"
         );
         line.clear();
-        if reader.read_line(&mut line)? == 0 {
-            break;
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                break;
+            }
+            Err(error) => return Err(error.into()),
         }
+        let line = match std::str::from_utf8(&line) {
+            Ok(line) => line,
+            Err(error) if error.error_len().is_none() => break,
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context("Invalid UTF-8 in provider stream"));
+            }
+        };
         let Some(data) = line.strip_prefix("data:") else {
             continue;
         };
@@ -3037,12 +3210,24 @@ fn decode_stream_mode(
             complete = true;
             break;
         }
-        let event: Value = serde_json::from_str(data.trim())?;
+        let event: Value = match serde_json::from_str(data.trim()) {
+            Ok(event) => event,
+            Err(error) if error.is_eof() || !line.ends_with('\n') => break,
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context("Invalid provider stream event"));
+            }
+        };
+        usage.update(&event["usage"]);
+        usage.update(&event["message"]["usage"]);
+        usage.update(&event["response"]["usage"]);
         if let Some(error) = event.get("error").filter(|error| !error.is_null()) {
             let detail = error["message"]
                 .as_str()
                 .or(error.as_str())
                 .unwrap_or("Provider returned a stream error");
+            if provider_stream_closed(detail) {
+                return Err(InterruptedStream.into());
+            }
             bail!("{}", detail.chars().take(1200).collect::<String>());
         }
         ensure!(event["type"] != "error", "Provider returned a stream error");
@@ -3187,6 +3372,12 @@ fn decode_stream_mode(
                 _ => {}
             }
         } else {
+            if matches!(
+                event["choices"][0]["finish_reason"].as_str(),
+                Some("stop" | "tool_calls" | "function_call")
+            ) {
+                complete = true;
+            }
             if let Some(calls) = event["choices"][0]["delta"]["tool_calls"].as_array() {
                 for delta in calls {
                     let index = delta["index"].as_u64().unwrap_or(0);
@@ -3216,13 +3407,9 @@ fn decode_stream_mode(
             }
         }
     }
-    ensure!(
-        complete && (!output.is_empty() || !reasoning.is_empty() || !tools.is_empty()),
-        tr!(
-            "Ответ провайдера оборвался. Повтори запрос.",
-            "Provider response was incomplete. Retry your request."
-        )
-    );
+    if !complete || (output.is_empty() && reasoning.is_empty() && tools.is_empty()) {
+        return Err(InterruptedStream.into());
+    }
     ensure!(
         tools.len() <= 32,
         "Provider returned more than 32 tool calls"
@@ -3234,10 +3421,12 @@ fn decode_stream_mode(
             !call.id.is_empty() && ids.insert(&call.id),
             "Provider returned invalid tool call identifiers"
         );
-        ensure!(
-            parse_action(&call.arguments).is_some(),
-            "Incomplete tool arguments"
-        );
+        if parse_action(&call.arguments).is_none() {
+            if serde_json::from_str::<Value>(&call.arguments).is_err_and(|error| error.is_eof()) {
+                return Err(InterruptedStream.into());
+            }
+            bail!("Provider returned invalid tool arguments");
+        }
     }
     Ok(Reply {
         content: output,
@@ -3245,6 +3434,7 @@ fn decode_stream_mode(
         raw_reasoning,
         calls: tools.into_values().collect(),
         wire_blocks: wire_blocks.into_values().collect(),
+        usage,
     })
 }
 
@@ -3256,22 +3446,25 @@ fn model_menu(
     let entries: Vec<_> = state.providers.iter().map(model_entry).collect();
     let mut draft = None;
     loop {
-        let action = match screen.models(&entries, active_index(state), draft.take())? {
-            ui::ModelAction::Duplicate(index) => {
-                let mut entry = entries[index].clone();
-                entry.name.clear();
-                entry.model.clear();
-                entry.key_source = Some(index);
-                entry.context = default_context();
-                entry.input = entry.context - DEFAULT_OUTPUT;
-                entry.output = DEFAULT_OUTPUT;
-                entry.reasoning = Reasoning::Off;
-                entry.reasoning_api = ReasoningApi::Auto;
-                entry.vision = false;
-                entry.chat_only = false;
-                draft = Some((None, entry));
+        let mut action = screen.models(&entries, active_index(state), draft.take())?;
+        if let ui::ModelAction::Duplicate(index, catalog) = action {
+            let existing = &entries[index];
+            let entry = ui::ModelEntry {
+                url: existing.url.clone(),
+                key_set: existing.key_set,
+                key_source: Some(index),
+                anthropic: existing.anthropic,
+                responses: existing.responses,
+                ..Default::default()
+            };
+            if catalog {
+                action = ui::ModelAction::Catalog { index: None, entry };
+            } else {
+                draft = Some((None, entry, None));
                 continue;
             }
+        }
+        let action = match action {
             ui::ModelAction::Catalog { index, mut entry } => {
                 let existing = index
                     .or(entry.key_source)
@@ -3288,7 +3481,18 @@ fn model_menu(
                         .collect(),
                     Err(error) => {
                         chat_error(history, tr!("Каталог моделей", "Model catalog"), error);
-                        return Ok(false);
+                        draft = Some((
+                            index,
+                            entry,
+                            Some(
+                                tr!(
+                                    "Каталог недоступен. Введи ID модели вручную.",
+                                    "Catalog unavailable. Enter the model ID manually."
+                                )
+                                .into(),
+                            ),
+                        ));
+                        continue;
                     }
                 };
                 if models.is_empty() {
@@ -3304,7 +3508,7 @@ fn model_menu(
                         entry.name = entry.model.chars().take(64).collect();
                     }
                 }
-                draft = Some((index, entry));
+                draft = Some((index, entry, None));
                 continue;
             }
             ui::ModelAction::Test(index) => {
@@ -3324,7 +3528,7 @@ fn model_menu(
                 }
                 return Ok(false);
             }
-            ui::ModelAction::Auto { index, entry } => {
+            ui::ModelAction::Auto { index, mut entry } => {
                 let existing = index
                     .or(entry.key_source)
                     .and_then(|i| state.providers.get(i));
@@ -3340,7 +3544,25 @@ fn model_menu(
                         None
                     }
                 };
-                let details = auto_configure(&mut provider, metadata.as_ref(), history);
+                let missing = entry.missing_limits();
+                if missing {
+                    fill_missing_limits(&mut entry, metadata.as_ref());
+                    let error =
+                        if entry.missing_limits() {
+                            Some(tr!(
+                            "Провайдер не сообщил все лимиты. Заполни пустые поля вручную.",
+                            "The provider did not publish all limits. Fill in the blank fields."
+                        ).into())
+                        } else {
+                            entry.validation_error()
+                        };
+                    if error.is_some() {
+                        draft = Some((index, entry, error));
+                        continue;
+                    }
+                    provider = provider_from_entry(entry.clone(), existing);
+                }
+                let details = auto_configure(&mut provider, metadata.as_ref(), history, !missing);
                 let text = trf!(
                     "Модель: {}\nКонтекст: {}\nВход: {}\nВыход: {}\nРассуждение: {} · {}\n\n{}",
                     "Model: {}\nContext: {}\nInput: {}\nOutput: {}\nReasoning: {} · {}\n\n{}",
@@ -3357,12 +3579,16 @@ fn model_menu(
                     let mut updated = model_entry(&provider);
                     updated.key = entry.key;
                     updated.key_source = entry.key_source;
+                    if let Some(error) = updated.validation_error() {
+                        draft = Some((index, updated, Some(error)));
+                        continue;
+                    }
                     ui::ModelAction::Save {
                         index,
                         entry: updated,
                     }
                 } else {
-                    draft = Some((index, entry));
+                    draft = Some((index, entry, None));
                     continue;
                 }
             }
@@ -3404,9 +3630,7 @@ fn model_catalog(provider: &Provider) -> Result<Vec<Value>> {
     Ok(result["data"].as_array().cloned().unwrap_or_default())
 }
 
-fn apply_metadata(provider: &mut Provider, metadata: Option<&Value>) -> (bool, bool) {
-    let empty = Value::Null;
-    let metadata = metadata.unwrap_or(&empty);
+fn catalog_limits(metadata: &Value) -> (Option<u32>, Option<u32>, Option<u32>) {
     let number = |field: &Value| {
         field
             .as_u64()
@@ -3414,13 +3638,46 @@ fn apply_metadata(provider: &mut Provider, metadata: Option<&Value>) -> (bool, b
             .filter(|&n| n > 0 && n <= 10_000_000)
     };
     let out = number(&metadata["max_output_tokens"])
+        .or_else(|| number(&metadata["max_completion_tokens"]))
         .or_else(|| number(&metadata["max_tokens"]))
-        .or_else(|| number(&metadata["top_provider"]["max_completion_tokens"]));
-    let input = number(&metadata["max_input_tokens"]);
+        .or_else(|| number(&metadata["top_provider"]["max_completion_tokens"]))
+        .filter(|value| *value >= 256);
+    let input = number(&metadata["max_input_tokens"]).filter(|value| *value >= 1000);
     let context = number(&metadata["context_window"])
         .or_else(|| number(&metadata["context_length"]))
-        .or_else(|| input.map(|n| n.saturating_add(out.unwrap_or(provider.output_limit()))));
-    if context.is_some_and(|n| n >= 1256) || out.is_some() {
+        .or_else(|| Some(input?.saturating_add(out?)))
+        .filter(|value| (1256..=10_000_000).contains(value));
+    (context, input, out)
+}
+
+fn fill_missing_limits(entry: &mut ui::ModelEntry, metadata: Option<&Value>) {
+    let (context, input, output) = catalog_limits(metadata.unwrap_or(&Value::Null));
+    if entry.context == 0 {
+        entry.context = context.unwrap_or(0);
+    }
+    if entry.output == 0 {
+        entry.output = output.unwrap_or(0);
+    }
+    if entry.input == 0 {
+        let available = (entry.context > 0 && entry.output > 0)
+            .then(|| entry.context.saturating_sub(entry.output))
+            .filter(|value| *value >= 1000);
+        entry.input = match (available, input) {
+            (Some(available), Some(limit)) => available.min(limit),
+            (Some(available), None) => available,
+            (None, limit) => limit.unwrap_or(0),
+        };
+    }
+}
+
+fn apply_metadata(
+    provider: &mut Provider,
+    metadata: Option<&Value>,
+    apply_limits: bool,
+) -> (bool, bool) {
+    let metadata = metadata.unwrap_or(&Value::Null);
+    let (context, input, out) = catalog_limits(metadata);
+    if apply_limits && (context.is_some() || out.is_some()) {
         let context = context
             .filter(|&n| n >= 1256)
             .unwrap_or(provider.context)
@@ -3491,8 +3748,9 @@ fn auto_configure(
     provider: &mut Provider,
     metadata: Option<&Value>,
     history: &mut Vec<Message>,
+    apply_limits: bool,
 ) -> String {
-    let (limits_known, reason_declared) = apply_metadata(provider, metadata);
+    let (limits_known, reason_declared) = apply_metadata(provider, metadata, apply_limits);
     let limits = if limits_known {
         tr!(
             "Контекст и выход получены из каталога.",
@@ -3708,8 +3966,12 @@ mod tests {
             attachment_prefix("draft @\"Some Folder/n"),
             Some("\"Some Folder/n")
         );
-        assert!(attach_files(root.path(), "Check @\"Some Folder/notes.txt\"")?.ends_with("hello"));
-        assert!(attach_files(root.path(), "Check @.env").is_err());
+        assert!(
+            attach_files(root.path(), "Check @\"Some Folder/notes.txt\"", &[])?
+                .0
+                .ends_with("hello")
+        );
+        assert!(attach_files(root.path(), "Check @.env", &[]).is_err());
         Ok(())
     }
 
@@ -3909,6 +4171,82 @@ mod provider_tests {
     }
 
     #[test]
+    fn a_cut_event_or_reset_is_retryable_but_never_returns_partial_tool_calls() {
+        struct Reset;
+        impl Read for Reset {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+            }
+        }
+        let tool = json!({"choices":[{"delta":{"tool_calls":[{
+            "index":0,"id":"one","function":{"name":"project","arguments":"{\"action\":\"create_file\""}
+        }]}}]});
+        let part = format!("data: {tool}\n\n");
+        for tail in [
+            "data: {\"choices\":[{\"delta\":{\"content\":\"cut",
+            "data: [DONE]\n",
+        ] {
+            assert!(
+                decode(&format!("{part}{tail}"), false)
+                    .unwrap_err()
+                    .is::<InterruptedStream>()
+            );
+        }
+        let reader = BufReader::new(std::io::Cursor::new(part).chain(Reset));
+        let (sender, _) = mpsc::channel();
+        assert!(
+            decode_stream(reader, false, &AtomicBool::new(false), sender)
+                .unwrap_err()
+                .is::<InterruptedStream>()
+        );
+    }
+
+    #[test]
+    fn explicit_stream_finish_preserves_usage_without_a_done_marker() -> Result<()> {
+        let stream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Finished\"},\"finish_reason\":\"stop\"}]}\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":13}}\n"
+        );
+        let reply = decode(stream, false)?;
+        assert_eq!(reply.content, "Finished");
+        assert_eq!(reply.usage.input, Some(120));
+        assert_eq!(reply.usage.output, Some(13));
+        Ok(())
+    }
+
+    #[test]
+    fn blank_model_limits_use_catalog_and_preserve_manual_fields() {
+        let mut entry = ui::ModelEntry {
+            context: 64_000,
+            ..Default::default()
+        };
+        fill_missing_limits(&mut entry, Some(&json!({"context_length":128000})));
+        assert_eq!((entry.context, entry.input, entry.output), (64_000, 0, 0));
+        fill_missing_limits(&mut entry, Some(&json!({"max_completion_tokens":8192})));
+        assert_eq!(
+            (entry.context, entry.input, entry.output),
+            (64_000, 55_808, 8_192)
+        );
+    }
+
+    #[test]
+    fn project_attachments_and_pastes_have_a_compact_display() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        fs::write(project.path().join("notes.md"), "attachment body")?;
+        let pasted = "@this-is-literal\n".repeat(60);
+        let (content, display) = attach_files(
+            project.path(),
+            "Read @notes.md",
+            std::slice::from_ref(&pasted),
+        )?;
+        assert!(content.contains("attachment body") && content.contains(&pasted));
+        let display = display.unwrap();
+        assert!(display.contains("@notes.md") && display.contains('6'));
+        assert!(!display.contains("attachment body") && !display.contains("@this-is-literal"));
+        Ok(())
+    }
+
+    #[test]
     fn tool_batches_keep_results_and_reasoning_with_the_correct_response() -> Result<()> {
         let messages = [
             json!({"choices":[{"delta":{"reasoning_content":"reason","tool_calls":[
@@ -3934,11 +4272,13 @@ mod provider_tests {
                 role: "assistant".into(),
                 content: call.arguments.clone(),
                 reasoning: None,
+                ..Default::default()
             });
             history.push(Message {
                 role: "user".into(),
                 content: format!("Result for {}", call.id),
                 reasoning: None,
+                ..Default::default()
             });
         }
         chat_error(&mut history, "Local error", "not sent");
@@ -3963,7 +4303,10 @@ mod provider_tests {
             "owned_by":"deepseek", "context_window":100_000,"max_output_tokens":30_000,
             "input_modalities":["text","image"], "effort":{"supported_levels":["low","high","max"],"default_level":"high"}
         });
-        assert_eq!(apply_metadata(&mut provider, Some(&catalog)), (true, true));
+        assert_eq!(
+            apply_metadata(&mut provider, Some(&catalog), true),
+            (true, true)
+        );
         assert_eq!(provider.input_limit(), 70_000);
         assert!(provider.vision);
         assert_eq!(provider.reasoning_api, ReasoningApi::DeepSeek);
@@ -4029,6 +4372,7 @@ mod provider_tests {
                     role: "user".into(),
                     content: "test".into(),
                     reasoning: None,
+                    ..Default::default()
                 }],
             }],
         };
@@ -4043,6 +4387,7 @@ mod provider_tests {
             role: "user".into(),
             content: text.into(),
             reasoning: None,
+            ..Default::default()
         }
     }
 
@@ -4257,11 +4602,13 @@ mod vision_tests {
                 role: "assistant".into(),
                 content: result.calls[0].arguments.clone(),
                 reasoning: None,
+                ..Default::default()
             },
             Message {
                 role: "user".into(),
                 content: "File contents".into(),
                 reasoning: None,
+                ..Default::default()
             },
         ];
         let wire = WireCalls::from([(0, result)]);
