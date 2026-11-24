@@ -683,6 +683,33 @@ fn extract(
 }
 
 #[cfg(test)]
+pub(crate) fn restore_test_agent_state(legacy: &[u8]) -> Result<tempfile::TempDir> {
+    let source = tempfile::tempdir()?;
+    let path = source.path().join("oc-state/carrycode-agent/state.json");
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(path, legacy)?;
+
+    let secret = SecretString::from("synthetic migration password".to_owned());
+    let destination = tempfile::tempdir()?;
+    let snapshot = destination.path().join("legacy.age");
+    write_snapshot(
+        source.path(),
+        &secret,
+        "migration-test",
+        1,
+        &RecentFolders::default(),
+        &mut File::create(&snapshot)?,
+    )?;
+    extract(
+        &snapshot,
+        &secret,
+        "migration-test",
+        Some(destination.path()),
+    )?;
+    Ok(destination)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

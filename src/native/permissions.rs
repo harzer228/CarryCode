@@ -2,6 +2,73 @@ use anyhow::{Result, ensure};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
+pub(super) const WORKER_ACTIONS: &[&str] = &["read", "list", "stat", "search", "glob"];
+
+pub(super) const PLAN_ACTIONS: &[&str] = &[
+    "read",
+    "list",
+    "search",
+    "glob",
+    "stat",
+    "inspect_project",
+    "ask_user",
+];
+
+pub(super) fn plan_allows_action(action: &Value) -> bool {
+    action.get("root").is_none_or(Value::is_null)
+        && action["action"]
+            .as_str()
+            .is_some_and(|name| PLAN_ACTIONS.contains(&name))
+}
+
+pub(super) fn plan_allows_command(command: &str) -> bool {
+    !command.starts_with('/')
+        || matches!(
+            command,
+            "/plan"
+                | "/plan cancel"
+                | "/code"
+                | "/help"
+                | "/header"
+                | "/theme"
+                | "/agents"
+                | "/tools"
+                | "/status"
+                | "/continue"
+                | "/quit"
+                | "/exit"
+                | "/model"
+                | "/models"
+                | "/provider"
+                | "/providers"
+                | "/reasoning"
+                | "/new"
+                | "/sessions"
+                | "/temporary"
+                | "/clear"
+        )
+        || command.starts_with("/reasoning ")
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DialogMode {
+    #[default]
+    Agent,
+    Chat,
+}
+
+impl DialogMode {
+    pub(super) const ALL: [Self; 2] = [Self::Agent, Self::Chat];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Agent => tr!("Агент", "Agent"),
+            Self::Chat => tr!("Только чат", "Chat only"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum Mode {
     Ask,

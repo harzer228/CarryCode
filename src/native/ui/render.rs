@@ -54,6 +54,7 @@ pub struct Style {
     pub bg: Option<Color>,
     pub bold: bool,
     pub reversed: bool,
+    pub literal_colors: bool,
 }
 
 impl Style {
@@ -63,6 +64,7 @@ impl Style {
             bg: None,
             bold: false,
             reversed: false,
+            literal_colors: false,
         }
     }
 
@@ -645,16 +647,16 @@ fn link(characters: &[char], start: usize) -> Option<(String, String, usize)> {
     Some((label, url, end + 1))
 }
 
-/// The green mark from the launcher: three nodes joined by lines, drawn with
-/// half blocks from an anti-aliased 16x16 pixel field.
+/// The green mark from the launcher, drawn with half-block antialiasing.
 pub fn logo() -> Vec<Line> {
+    let (shade, accent) = super::theme::logo_colors();
     let mut rows = Vec::with_capacity(MARK / 2);
     for row in 0..MARK / 2 {
         let mut line = Line::new();
         let mut run = String::new();
         let mut current: Option<(Option<Color>, Option<Color>)> = None;
         for column in 0..MARK {
-            let (foreground, background, glyph) = mark_cell(column, row);
+            let (foreground, background, glyph) = mark_cell(column, row, shade, accent);
             if current != Some((foreground, background)) {
                 if let Some((fg, bg)) = current {
                     line.push(run.clone(), palette(fg, bg));
@@ -672,16 +674,16 @@ pub fn logo() -> Vec<Line> {
     rows
 }
 
-fn palette(foreground: Option<Color>, background: Option<Color>) -> Style {
-    Style {
-        fg: foreground,
-        bg: background,
-        ..Style::plain()
-    }
-}
-
-fn mark_cell(column: usize, row: usize) -> (Option<Color>, Option<Color>, char) {
-    match (mark_pixel(column, 2 * row), mark_pixel(column, 2 * row + 1)) {
+fn mark_cell(
+    column: usize,
+    row: usize,
+    shade: [f32; 3],
+    accent: [f32; 3],
+) -> (Option<Color>, Option<Color>, char) {
+    match (
+        mark_pixel(column, 2 * row, shade, accent),
+        mark_pixel(column, 2 * row + 1, shade, accent),
+    ) {
         (None, None) => (None, None, ' '),
         (Some(top), None) => (Some(top), None, '▀'),
         (None, Some(bottom)) => (Some(bottom), None, '▄'),
@@ -690,7 +692,7 @@ fn mark_cell(column: usize, row: usize) -> (Option<Color>, Option<Color>, char) 
     }
 }
 
-fn mark_pixel(column: usize, row: usize) -> Option<Color> {
+fn mark_pixel(column: usize, row: usize, shade: [f32; 3], accent: [f32; 3]) -> Option<Color> {
     const SCALE: f32 = 1.2;
     let x = (column as f32 + 0.5 - MARK as f32 / 2.) / SCALE - 1.85;
     let y = (row as f32 + 0.5 - MARK as f32 / 2.) / SCALE + 1.5;
@@ -703,13 +705,22 @@ fn mark_pixel(column: usize, row: usize) -> Option<Color> {
         .min(node(d, 1.8))
         - 0.85;
     let coverage = (0.5 - distance * SCALE).clamp(0., 1.);
-    (coverage >= 0.3).then(|| mix([30., 40., 34.], [181., 214., 178.], coverage))
+    (coverage >= 0.3).then(|| mix(shade, accent, coverage))
 }
 
 fn segment(x: f32, y: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
     let (px, py, dx, dy) = (x - a.0, y - a.1, b.0 - a.0, b.1 - a.1);
     let h = ((px * dx + py * dy) / (dx * dx + dy * dy)).clamp(0., 1.);
-    (px - dx * h).hypot(py - dy * h)
+    (px - h * dx).hypot(py - h * dy)
+}
+
+fn palette(foreground: Option<Color>, background: Option<Color>) -> Style {
+    Style {
+        fg: foreground,
+        bg: background,
+        literal_colors: true,
+        ..Style::plain()
+    }
 }
 
 fn mix(from: [f32; 3], to: [f32; 3], t: f32) -> Color {
@@ -739,7 +750,10 @@ pub fn context_indicator(percent: Option<u64>, over_limit: bool) -> Line {
 }
 
 pub fn human(tokens: u32) -> String {
-    if tokens >= 1000 {
+    if tokens >= 1_000_000 {
+        let value = format!("{:.2}", f64::from(tokens) / 1_000_000.0);
+        format!("{}M", value.trim_end_matches('0').trim_end_matches('.'))
+    } else if tokens >= 1000 {
         format!("{:.1}k", tokens as f32 / 1000.)
     } else {
         tokens.to_string()
@@ -782,6 +796,27 @@ pub fn sanitize(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logo_antialias_uses_the_selected_theme_across_the_edge() {
+        super::super::theme::set(super::super::theme::Theme::Sage);
+        let sage = logo();
+        super::super::theme::set(super::super::theme::Theme::ClaudeInspired);
+        let claude = logo();
+        let sage_colors: Vec<_> = sage
+            .iter()
+            .flat_map(|line| line.spans().iter())
+            .map(|span| span.style.fg)
+            .collect();
+        let claude_colors: Vec<_> = claude
+            .iter()
+            .flat_map(|line| line.spans().iter())
+            .map(|span| span.style.fg)
+            .collect();
+        assert_eq!(sage_colors.len(), claude_colors.len());
+        assert!(sage_colors.iter().zip(&claude_colors).any(|(a, b)| a != b));
+        super::super::theme::set(super::super::theme::Theme::Sage);
+    }
 
     #[test]
     fn control_sequences_never_reach_the_screen() {
@@ -898,6 +933,9 @@ mod tests {
     fn status_numbers_stay_short() {
         assert_eq!(human(102), "102");
         assert_eq!(human(128_000), "128.0k");
+        assert_eq!(human(1_000_000), "1M");
+        assert_eq!(human(1_250_000), "1.25M");
+        assert_eq!(human(10_000_000), "10M");
         assert_eq!(dur(59), "59s");
         assert_eq!(dur(3_725), "1h 02m");
         assert_eq!(tail("C:/very/long/path", 8), "…ng/path");

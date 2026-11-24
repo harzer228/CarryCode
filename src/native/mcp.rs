@@ -1,7 +1,7 @@
 //! MCP servers over the stdio transport.
 //!
-//! CarryCode reads `mcp.json` from the project and from the user profile, starts
-//! the enabled servers, lists their tools and lets the agent call them. Existing
+//! CarryCode starts enabled user servers and waits for consent before starting
+//! project servers. Existing
 //! configurations from Claude Code, Codex and OpenCode can be imported from the
 //! `/mcp` screen; only stdio servers are supported, which is what nearly all
 //! local MCP servers use.
@@ -24,7 +24,7 @@ const MAX_STDERR: usize = 16 * 1024;
 const DEFAULT_STARTUP: u64 = 20;
 const DEFAULT_TOOL_TIMEOUT: u64 = 120;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub name: String,
     pub command: String,
@@ -34,6 +34,7 @@ pub struct ServerConfig {
     pub startup_timeout: u64,
     pub tool_timeout: u64,
     pub source: String,
+    project_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -55,6 +56,7 @@ pub struct ServerStatus {
     pub running: bool,
     pub tools: usize,
     pub error: Option<String>,
+    pub pending: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -73,43 +75,70 @@ struct Running {
 /// Owns the configured servers for one agent session.
 pub struct Hub {
     configs: Vec<ServerConfig>,
+    approved: Vec<ServerConfig>,
     running: BTreeMap<String, Running>,
     statuses: Vec<ServerStatus>,
     errors: Vec<String>,
 }
 
 impl Hub {
-    /// Loads both config files and starts every enabled server. Configuration
-    /// errors are collected for the `/mcp` screen instead of stopping the agent.
+    /// Loads the configuration and starts only eligible user servers.
+    /// Project entries remain pending until explicitly approved.
     pub fn load(directory: &Path) -> Self {
-        let (configs, mut errors) = load_configs(directory);
         let mut hub = Self {
-            configs,
+            configs: Vec::new(),
+            approved: Vec::new(),
             running: BTreeMap::new(),
             statuses: Vec::new(),
             errors: Vec::new(),
         };
-        hub.start(directory);
-        errors.append(&mut hub.errors);
-        hub.errors = errors;
+        hub.restart(directory);
         hub
+    }
+
+    pub fn pending(&self, index: usize) -> Option<&ServerConfig> {
+        let config = self.configs.get(index)?;
+        (config.enabled && config.project_path.is_some() && !self.approved.contains(config))
+            .then_some(config)
+    }
+
+    pub fn approve(&mut self, directory: &Path, config: ServerConfig) {
+        if config.enabled && config.project_path.is_some() {
+            self.approved.push(config);
+        }
+        // Re-read and discard stale consent before starting anything.
+        self.restart(directory);
     }
 
     fn start(&mut self, directory: &Path) {
         self.running.clear();
         self.statuses.clear();
-        for config in self.configs.clone() {
-            if !config.enabled {
+        for (index, config) in self.configs.iter().enumerate() {
+            let pending = self.pending(index).map(|_| index);
+            if pending.is_some() || (!config.enabled && config.project_path.is_some()) {
                 self.statuses.push(ServerStatus {
-                    name: config.name,
-                    source: config.source,
+                    name: config.name.clone(),
+                    source: config.source.clone(),
                     running: false,
                     tools: 0,
                     error: None,
+                    pending,
+                });
+            }
+        }
+        for config in effective_configs(&self.configs, &self.approved).into_values() {
+            if !config.enabled {
+                self.statuses.push(ServerStatus {
+                    name: config.name.clone(),
+                    source: config.source.clone(),
+                    running: false,
+                    tools: 0,
+                    error: None,
+                    pending: None,
                 });
                 continue;
             }
-            match Client::start(&config, directory).and_then(|mut client| {
+            match Client::start(config, directory).and_then(|mut client| {
                 let mut tools = client.list_tools()?;
                 for tool in &mut tools {
                     tool.server = config.name.clone();
@@ -119,23 +148,26 @@ impl Hub {
                 Ok((client, tools)) => {
                     let status = ServerStatus {
                         name: config.name.clone(),
-                        source: config.source,
+                        source: config.source.clone(),
                         running: true,
                         tools: tools.len(),
                         error: None,
+                        pending: None,
                     };
-                    self.running.insert(config.name, Running { client, tools });
+                    self.running
+                        .insert(config.name.clone(), Running { client, tools });
                     self.statuses.push(status);
                 }
                 Err(error) => {
                     let message = error.to_string();
                     self.errors.push(format!("{}: {message}", config.name));
                     self.statuses.push(ServerStatus {
-                        name: config.name,
-                        source: config.source,
+                        name: config.name.clone(),
+                        source: config.source.clone(),
                         running: false,
                         tools: 0,
                         error: Some(message),
+                        pending: None,
                     });
                 }
             }
@@ -144,6 +176,7 @@ impl Hub {
 
     pub fn restart(&mut self, directory: &Path) {
         let (configs, mut errors) = load_configs(directory);
+        self.approved.retain(|config| configs.contains(config));
         self.configs = configs;
         self.errors = Vec::new();
         self.start(directory);
@@ -204,6 +237,9 @@ impl Hub {
             self.statuses.len(),
             tools_phrase(tools)
         );
+        if self.statuses.iter().any(|status| status.pending.is_some()) {
+            summary.push_str(tr!(" · согласие в /mcp", " · approve in /mcp"));
+        }
         if failed > 0 {
             summary.push_str(&trf!(" · ошибок: {failed}", " · errors: {failed}"));
         }
@@ -211,14 +247,15 @@ impl Hub {
     }
 
     /// Servers found in the other CLIs that CarryCode does not know yet.
-    pub fn candidates(&self, directory: &Path) -> Vec<Candidate> {
+    pub fn candidates(&self) -> Vec<Candidate> {
         let configured: Vec<String> = self
             .configs
             .iter()
+            .filter(|config| config.project_path.is_none())
             .map(|config| config.name.to_lowercase())
             .collect();
         let mut candidates: Vec<Candidate> = Vec::new();
-        for candidate in import_candidates(directory) {
+        for candidate in import_candidates() {
             if configured.contains(&candidate.name.to_lowercase()) {
                 continue;
             }
@@ -280,6 +317,38 @@ impl Hub {
     }
 }
 
+impl ServerConfig {
+    pub fn approval_preview(&self) -> String {
+        let mut hide_next = false;
+        let args: Vec<_> = self
+            .args
+            .iter()
+            .map(|arg| {
+                let flag = arg.trim_start_matches('-');
+                let secret_option = arg.starts_with('-')
+                    && is_secret(flag.split_once('=').map_or(flag, |(key, _)| key));
+                let hidden = std::mem::replace(&mut hide_next, secret_option && !arg.contains('='));
+                if hidden || arg.contains("://") || secret_option && arg.contains('=') {
+                    tr!("<скрыто>", "<hidden>")
+                } else {
+                    arg.as_str()
+                }
+            })
+            .collect();
+        let path = self
+            .project_path
+            .as_deref()
+            .map_or_else(String::new, crate::folders::display);
+        let command = json!(self.command);
+        let args = json!(args);
+        let env = json!(self.env.keys().collect::<Vec<_>>());
+        trf!(
+            "Процесс запустится с твоими правами на текущий сеанс.\nФайл: {path}\nКоманда: {command}\nАргументы: {args}\nПеременные окружения (только имена): {env}",
+            "The process will run with your permissions for this session.\nFile: {path}\nCommand: {command}\nArguments: {args}\nEnvironment variables (names only): {env}"
+        )
+    }
+}
+
 /// Calls signed by the hub and used by the agent loop.
 pub fn describe_arguments(arguments: &Value) -> String {
     let mut value = arguments.clone();
@@ -332,18 +401,33 @@ fn is_secret(key: &str) -> bool {
     .any(|needle| key.contains(needle))
 }
 
+fn effective_configs<'a>(
+    configs: &'a [ServerConfig],
+    approved: &[ServerConfig],
+) -> BTreeMap<&'a str, &'a ServerConfig> {
+    let mut selected = BTreeMap::new();
+    for config in configs {
+        if config.project_path.is_none() || (config.enabled && approved.contains(config)) {
+            selected.insert(config.name.as_str(), config);
+        }
+    }
+    selected
+}
+
 fn load_configs(directory: &Path) -> (Vec<ServerConfig>, Vec<String>) {
-    let mut configs: Vec<ServerConfig> = Vec::new();
+    let mut configs = Vec::new();
     let mut errors = Vec::new();
     let mut paths = Vec::new();
     if let Ok(home) = user_config_path() {
-        paths.push((home, tr!("пользователь", "user")));
+        paths.push((home, tr!("пользователь", "user"), false));
     }
-    paths.push((
-        directory.join(".carrycode/mcp.json"),
-        tr!("проект", "project"),
-    ));
-    for (path, source) in paths {
+    let directory = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_owned());
+    for relative in [".mcp.json", ".carrycode/mcp.json"] {
+        paths.push((directory.join(relative), relative, true));
+    }
+    for (path, source, project) in paths {
         if !path.is_file() {
             continue;
         }
@@ -351,8 +435,9 @@ fn load_configs(directory: &Path) -> (Vec<ServerConfig>, Vec<String>) {
             Ok(Some(document)) => match parse_config_document(&document, source) {
                 Ok(parsed) => {
                     for mut config in parsed {
-                        config.source = source.to_owned();
-                        configs.retain(|existing| existing.name != config.name);
+                        if project {
+                            config.project_path = Some(path.clone());
+                        }
                         configs.push(config);
                     }
                 }
@@ -367,11 +452,8 @@ fn load_configs(directory: &Path) -> (Vec<ServerConfig>, Vec<String>) {
 
 /// Whether at least one MCP config file exists, so the UI can show a waiting
 /// line before starting servers.
-pub fn configured(directory: &Path) -> bool {
-    user_config_path()
-        .map(|path| path.is_file())
-        .unwrap_or(false)
-        || directory.join(".carrycode/mcp.json").is_file()
+pub fn configured() -> bool {
+    user_config_path().is_ok_and(|path| path.is_file())
 }
 
 /// Resolves the program the same way a shell would on Windows. `npx` and
@@ -447,6 +529,7 @@ fn parse_config_document(document: &Value, source: &str) -> Result<Vec<ServerCon
             startup_timeout: seconds(item.get("startup_timeout_sec"), DEFAULT_STARTUP, 1, 120),
             tool_timeout: seconds(item.get("tool_timeout_sec"), DEFAULT_TOOL_TIMEOUT, 1, 600),
             source: source.to_owned(),
+            project_path: None,
         });
     }
     Ok(configs)
@@ -527,14 +610,13 @@ fn write_private_json(path: &Path, document: &Value) -> Result<()> {
 
 // ───────────────────────── import from other CLIs ─────────────────────────
 
-fn import_candidates(directory: &Path) -> Vec<Candidate> {
+fn import_candidates() -> Vec<Candidate> {
     let mut candidates = Vec::new();
     if let Some(candidate) = claude_candidates() {
         candidates.extend(candidate);
     }
     candidates.extend(codex_candidates());
     candidates.extend(opencode_candidates());
-    candidates.extend(project_mcp_candidates(directory));
     candidates
 }
 
@@ -548,22 +630,6 @@ fn claude_candidates() -> Option<Vec<Candidate>> {
             .filter_map(|(name, item)| candidate("Claude Code", name, item))
             .collect(),
     )
-}
-
-fn project_mcp_candidates(directory: &Path) -> Vec<Candidate> {
-    let path = directory.join(".mcp.json");
-    let Ok(Some(document)) = read_json_document(&path) else {
-        return Vec::new();
-    };
-    document
-        .get("mcpServers")
-        .and_then(Value::as_object)
-        .map(|map| {
-            map.iter()
-                .filter_map(|(name, item)| candidate("проект .mcp.json", name, item))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn candidate(source: &str, name: &str, item: &Value) -> Option<Candidate> {
@@ -1254,6 +1320,87 @@ impl Drop for ProcessTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_servers_only_override_after_exact_session_approval() {
+        let mut configs = parse_config_document(
+            &json!({"servers": {"demo": {"command": "user-server"}}}),
+            "user",
+        )
+        .unwrap();
+        let mut project = configs[0].clone();
+        project.project_path = Some(PathBuf::from("project/.mcp.json"));
+        project.command = "project-server".into();
+        configs.push(project.clone());
+        assert_eq!(
+            effective_configs(&configs, &[])["demo"].command,
+            "user-server"
+        );
+        let approvals = [project.clone()];
+        assert_eq!(
+            effective_configs(&configs, &approvals)["demo"].command,
+            "project-server"
+        );
+        configs[1].env.insert("TOKEN".into(), "synthetic".into());
+        assert_eq!(
+            effective_configs(&configs, &approvals)["demo"].command,
+            "user-server"
+        );
+        configs[1] = project;
+        configs[1].project_path = Some(PathBuf::from("other/.mcp.json"));
+        assert_eq!(
+            effective_configs(&configs, &approvals)["demo"].command,
+            "user-server"
+        );
+    }
+
+    #[test]
+    fn hub_does_not_attempt_to_start_a_project_server_without_approval() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let path = project.path().join(".mcp.json");
+        fs::write(
+            &path,
+            json!({"mcpServers": {"carrycode-test-project-only": {
+                "command": project.path().join("nonexistent-test-server.exe")
+            }}})
+            .to_string(),
+        )?;
+        let (configs, _) = load_configs(project.path());
+        let config = configs
+            .into_iter()
+            .find(|config| config.project_path.is_some())
+            .unwrap();
+        let mut hub = Hub {
+            configs: vec![config.clone()],
+            approved: Vec::new(),
+            running: BTreeMap::new(),
+            statuses: Vec::new(),
+            errors: Vec::new(),
+        };
+        hub.start(project.path());
+        assert_eq!(hub.statuses[0].pending, Some(0));
+        assert!(hub.errors.is_empty());
+        hub.approved.push(config);
+        hub.start(project.path());
+        assert_eq!(hub.statuses[0].pending, None);
+        assert!(hub.statuses[0].error.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn project_approval_preview_hides_secret_arguments_and_environment_values() {
+        let document = json!({"servers": {"demo": {
+            "command": "node",
+            "args": ["server.js", "--token", "hidden-one", "--password=hidden-two"],
+            "env": {"TOKEN": "hidden-three"}
+        }}});
+        let preview = parse_config_document(&document, "project").unwrap()[0].approval_preview();
+        assert!(preview.contains("node") && preview.contains("server.js"));
+        assert!(preview.contains("TOKEN"));
+        assert!(!preview.contains("hidden-one"));
+        assert!(!preview.contains("hidden-two"));
+        assert!(!preview.contains("hidden-three"));
+    }
 
     #[test]
     fn codex_toml_extracts_servers_and_env() {

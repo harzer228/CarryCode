@@ -6,10 +6,12 @@
 //! interaction: history, `/` menu, F2 tool details, scrollback and the
 //! suspend/resume handshake used while a reviewed edit or a task runs.
 
+mod models;
 mod render;
 mod selection;
+pub(super) mod theme;
 
-use super::Message;
+use super::{Message, permissions::DialogMode};
 use anyhow::Result;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -27,6 +29,7 @@ use crossterm::{
         EnterAlternateScreen, LeaveAlternateScreen,
     },
 };
+pub(super) use models::{ModelAction, ModelEdit};
 use render::{Line, Style};
 use selection::{Selection, Viewport};
 use std::{
@@ -43,14 +46,40 @@ const INPUT_LIMIT: usize = 64 * 1024;
 const PASTE_LIMIT: usize = 192 * 1024;
 
 /// Commands offered by the slash menu. Descriptions are localized.
-fn commands() -> [(&'static str, &'static str); 22] {
+fn commands() -> [(&'static str, &'static str); 28] {
     [
+        ("/theme", tr!("Оформление агента", "Agent appearance")),
+        (
+            "/agents",
+            tr!("Встроенные саб-агенты", "Built-in subagents"),
+        ),
+        (
+            "/continue",
+            tr!(
+                "Продолжить прерванный запрос",
+                "Resume an interrupted request"
+            ),
+        ),
+        (
+            "/header",
+            tr!("Скрыть или показать шапку", "Toggle the header"),
+        ),
         ("/project", tr!("Создать проект", "Create project")),
         ("/browser", tr!("Скрытый браузер", "Hidden browser")),
         ("/computer", tr!("Окно Windows", "Windows window")),
         ("/tools", tr!("Доступные инструменты", "Available tools")),
         ("/search", tr!("Поиск в интернете", "Search the web")),
-        ("/permissions", tr!("Режим разрешений", "Permission mode")),
+        (
+            "/permissions",
+            tr!(
+                "Режим диалога и разрешения",
+                "Conversation mode and permissions"
+            ),
+        ),
+        (
+            "/provider",
+            tr!("Подключения к провайдерам", "Provider connections"),
+        ),
         (
             "/model",
             tr!(
@@ -70,6 +99,13 @@ fn commands() -> [(&'static str, &'static str); 22] {
             tr!(
                 "MCP-серверы: статус, инструменты, импорт",
                 "MCP servers: status, tools, import"
+            ),
+        ),
+        (
+            "/plan",
+            tr!(
+                "Подготовить план без правок",
+                "Prepare a plan without editing"
             ),
         ),
         (
@@ -373,6 +409,42 @@ impl Editor {
         (shown, caret)
     }
 
+    fn composer(&self, width: usize, max_rows: usize) -> (Vec<String>, usize, usize) {
+        let text = self.text();
+        let row = self.buffer[..self.caret]
+            .iter()
+            .filter(|&&c| c == '\n')
+            .count();
+        let column = self.buffer[..self.caret]
+            .iter()
+            .rev()
+            .take_while(|&&c| c != '\n')
+            .count();
+        let all: Vec<_> = text.split('\n').collect();
+        let start = row
+            .saturating_sub(max_rows - 1)
+            .min(all.len().saturating_sub(max_rows));
+        let mut caret = 0;
+        let lines = all
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(max_rows)
+            .map(|(i, text)| {
+                if i == row {
+                    let mut editor = Editor::from(text);
+                    editor.caret = column;
+                    let (text, col) = editor.view(width);
+                    caret = col;
+                    text
+                } else {
+                    clip(text, width)
+                }
+            })
+            .collect();
+        (lines, row - start, caret)
+    }
+
     fn completion_prefix(&self) -> String {
         self.buffer[self.caret.saturating_sub(512)..self.caret]
             .iter()
@@ -415,6 +487,7 @@ struct Turn {
     first: Option<Instant>,
     request_seconds: f32,
     writing: bool,
+    mode: DialogMode,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -432,61 +505,41 @@ struct Cache {
     lines: Vec<Line>,
 }
 
-/// One saved model connection as the manager needs to see it.
-#[derive(Clone, Default)]
-pub struct ModelEntry {
-    pub name: String,
-    pub url: String,
-    pub model: String,
-    /// `Some` only when the user typed a new key in the form.
-    pub key: Option<String>,
-    pub key_set: bool,
-    pub key_source: Option<usize>,
-    pub anthropic: bool,
-    pub responses: bool,
-    pub vision: bool,
-    pub chat_only: bool,
-    pub context: u32,
-    pub input: u32,
-    pub output: u32,
-    pub reasoning: super::Reasoning,
-    pub reasoning_api: super::ReasoningApi,
-}
-
-impl ModelEntry {
-    pub(super) fn missing_limits(&self) -> bool {
-        [self.context, self.input, self.output].contains(&0)
-    }
-
-    pub(super) fn validation_error(&self) -> Option<String> {
-        ModelForm::new(None, Some(self)).entry().err()
-    }
-}
-
-pub enum ModelAction {
-    Activate(usize),
-    Test(usize),
-    Duplicate(usize, bool),
-    Catalog {
-        index: Option<usize>,
-        entry: ModelEntry,
-    },
-    Auto {
-        index: Option<usize>,
-        entry: ModelEntry,
-    },
-    Save {
-        index: Option<usize>,
-        entry: ModelEntry,
-    },
-    Delete(usize),
-    Close,
-}
-
 pub(super) enum StreamControl {
     Continue,
     Stop,
     Command(String),
+}
+
+#[derive(Default)]
+struct EscapeGate {
+    since: Option<Instant>,
+    held: bool,
+}
+
+impl EscapeGate {
+    fn active(&self, now: Instant) -> bool {
+        self.since
+            .is_some_and(|start| now.saturating_duration_since(start) < Duration::from_secs(7))
+    }
+
+    fn press(&mut self, now: Instant, release_events: bool) -> bool {
+        if release_events && self.held {
+            return false;
+        }
+        self.held = release_events;
+        let stop = self.active(now);
+        self.since = (!stop).then_some(now);
+        stop
+    }
+}
+
+fn newline_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Enter
+        && key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL)
+        || key.code == KeyCode::Char('j') && key.modifiers == KeyModifiers::CONTROL
 }
 
 pub struct Screen {
@@ -504,6 +557,12 @@ pub struct Screen {
     menu_closed: bool,
     armed: bool,
     diagnose: bool,
+    planning: bool,
+    header_hidden: bool,
+    escape: EscapeGate,
+    #[cfg(unix)]
+    enhanced_keys: bool,
+    theme: theme::Theme,
     tick: usize,
     turn: Option<Turn>,
     stats: Stats,
@@ -520,6 +579,7 @@ pub struct Screen {
     viewport: Option<Viewport>,
     selection: Option<Selection>,
     permission_mode: super::permissions::Mode,
+    dialog_mode: DialogMode,
     approval_card: bool,
 }
 
@@ -541,6 +601,12 @@ impl Screen {
             menu_closed: false,
             armed: false,
             diagnose: false,
+            planning: false,
+            header_hidden: false,
+            escape: EscapeGate::default(),
+            #[cfg(unix)]
+            enhanced_keys: false,
+            theme: theme::Theme::Sage,
             tick: 0,
             turn: None,
             stats: Stats::default(),
@@ -557,12 +623,31 @@ impl Screen {
             viewport: None,
             selection: None,
             permission_mode: Default::default(),
+            dialog_mode: DialogMode::Agent,
             approval_card: false,
         };
         if let Err(error) = enter() {
             let _ = terminal::disable_raw_mode();
             return Err(error.into());
         }
+        #[cfg(unix)]
+        let screen = {
+            use crossterm::event::{
+                KeyboardEnhancementFlags as Flags, PushKeyboardEnhancementFlags,
+            };
+            let mut screen = screen;
+            screen.enhanced_keys = terminal::supports_keyboard_enhancement().unwrap_or(false)
+                && execute!(
+                    io::stdout(),
+                    PushKeyboardEnhancementFlags(
+                        Flags::DISAMBIGUATE_ESCAPE_CODES
+                            | Flags::REPORT_EVENT_TYPES
+                            | Flags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    )
+                )
+                .is_ok();
+            screen
+        };
         Ok(screen)
     }
 
@@ -574,9 +659,9 @@ impl Screen {
         output: u32,
         reasoning: super::Reasoning,
     ) {
-        self.context_limit = context.max(1_000);
-        self.input_limit = input.clamp(1, self.context_limit);
-        self.output_limit = output.max(256);
+        self.context_limit = context;
+        self.input_limit = input;
+        self.output_limit = output;
         self.reasoning = reasoning;
     }
 
@@ -607,6 +692,7 @@ impl Screen {
 
     pub fn reset_conversation(&mut self) {
         self.permission_mode = Default::default();
+        self.dialog_mode = DialogMode::Agent;
         self.stats = Stats::default();
         self.turn = None;
         self.input_estimate = None;
@@ -672,7 +758,11 @@ impl Screen {
                     let mut edited = false;
                     match key.code {
                         KeyCode::F(6) => {
-                            self.permissions_menu()?;
+                            return Ok(Some("/permissions".into()));
+                        }
+                        _ if newline_key(key) => {
+                            self.editor.insert(['\n']);
+                            edited = true;
                         }
                         KeyCode::Enter | KeyCode::Tab if count > 0 => {
                             let name = &items[self.selected.min(count - 1)].0;
@@ -693,8 +783,13 @@ impl Screen {
                             continue;
                         }
                         KeyCode::Enter => {
-                            let line = self.editor.text().trim().to_owned();
-                            if line.is_empty() && self.pastes.is_empty() {
+                            let line = self.editor.text();
+                            let line = if line.contains('\n') {
+                                line
+                            } else {
+                                line.trim().to_owned()
+                            };
+                            if line.trim().is_empty() && self.pastes.is_empty() {
                                 continue;
                             }
                             if line == "/status" {
@@ -864,6 +959,18 @@ impl Screen {
         self.draw(history, Some((output, reasoning)), model, directory)?;
         if event::poll(Duration::from_millis(40))? {
             match event::read()? {
+                Event::Key(key) if key.code == KeyCode::Esc => {
+                    let release = cfg!(windows);
+                    #[cfg(unix)]
+                    let release = release || self.enhanced_keys;
+                    if key.kind == KeyEventKind::Release {
+                        self.escape.held = false;
+                    }
+                    if key.kind == KeyEventKind::Press && self.escape.press(Instant::now(), release)
+                    {
+                        return Ok(StreamControl::Stop);
+                    }
+                }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let key = normalize_key(key);
                     let items = self.menu(directory);
@@ -871,14 +978,18 @@ impl Screen {
                         KeyCode::F(8) if self.desktop_active => {
                             return Ok(StreamControl::Command("/computer stop".into()));
                         }
-                        KeyCode::Esc => return Ok(StreamControl::Stop),
+                        _ if newline_key(key) => {
+                            self.editor.insert(['\n']);
+                            self.menu_closed = false;
+                            self.selected = 0;
+                        }
                         #[cfg(windows)]
                         KeyCode::F(7) => self.paste_clipboard(),
                         #[cfg(windows)]
                         KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL => {
                             self.paste_clipboard();
                         }
-                        KeyCode::F(6) => self.permissions_menu()?,
+                        KeyCode::F(6) => return Ok(StreamControl::Command("/permissions".into())),
                         KeyCode::F(2) => {
                             self.selection = None;
                             self.details = !self.details;
@@ -900,7 +1011,7 @@ impl Screen {
                             }
                             self.selected = 0;
                         }
-                        KeyCode::Enter if self.editor.text().trim_start().starts_with('/') => {
+                        KeyCode::Enter if super::slash_command(&self.editor.text()) => {
                             let command = self.editor.text().trim().to_owned();
                             self.editor.clear();
                             return Ok(StreamControl::Command(command));
@@ -959,7 +1070,7 @@ impl Screen {
 
     fn submit(&mut self, line: &str) -> String {
         let line = line.to_owned();
-        if !line.starts_with('/') {
+        if !super::slash_command(&line) {
             self.submitted_pastes = std::mem::take(&mut self.pastes);
         }
         if self.submitted.last() != Some(&line) {
@@ -1028,6 +1139,7 @@ impl Screen {
             first: None,
             request_seconds: 0.0,
             writing: false,
+            mode: self.dialog_mode,
         });
     }
 
@@ -1077,8 +1189,11 @@ impl Screen {
             return Vec::new();
         }
         let prefix = self.editor.completion_prefix();
-        if let Some(query) = super::attachment_prefix(&prefix) {
+        if let Some(query) = super::attachment_prefix(prefix.rsplit('\n').next().unwrap_or("")) {
             return super::attachment_choices(directory, query);
+        }
+        if self.editor.buffer.contains(&'\n') {
+            return Vec::new();
         }
         menu_items(&prefix, false, false)
             .into_iter()
@@ -1089,7 +1204,8 @@ impl Screen {
     fn complete(&mut self, item: &str) -> Option<String> {
         let prefix = self.editor.completion_prefix();
         if item.starts_with('@') {
-            if let Some(query) = super::attachment_prefix(&prefix) {
+            if let Some(query) = super::attachment_prefix(prefix.rsplit('\n').next().unwrap_or(""))
+            {
                 self.editor.replace_tail(query.chars().count() + 1, item);
                 self.menu_closed = !item.ends_with('/');
             }
@@ -1185,15 +1301,21 @@ impl Screen {
                 width,
             )?;
             queue!(out, EndSynchronizedUpdate)?;
-            io::stdout().lock().write_all(&out)?;
+            let mut stdout = io::stdout().lock();
+            stdout.write_all(&out)?;
+            stdout.flush()?;
             self.background = out;
             return Ok(());
         }
         let content = width.saturating_sub(4).clamp(40, MAX_CONTENT);
         let margin = (width - content) / 2;
         let show_mark = content >= 70 && height >= 26;
-        let header_height = if show_mark { 10 } else { 5 };
-        self.header(&mut out, margin, content, model, directory, show_mark)?;
+        let header_height = if self.header_hidden {
+            1 // Keep the top row for the scroll position.
+        } else {
+            self.header(&mut out, margin, content, model, directory, show_mark)?;
+            if show_mark { 10 } else { 5 }
+        };
 
         let streaming = pending.is_some();
         let notice = if self.notice.is_empty() && !self.pastes.is_empty() {
@@ -1211,8 +1333,11 @@ impl Screen {
         menu_rows = menu_rows.min(height.saturating_sub(header_height + 7).max(1));
         let mut notice_rows = usize::from(!notice.is_empty());
         let mut gap_rows = 1usize;
+        let composer_rows = (self.editor.buffer.iter().filter(|&&c| c == '\n').count() + 1)
+            .min(3)
+            .min(height.saturating_sub(header_height + menu_rows + 5).max(1));
         let (conv_rows, notice_y, box_top) = loop {
-            let top = height.saturating_sub(3 + menu_rows);
+            let top = height.saturating_sub(2 + composer_rows + menu_rows);
             let gap = gap_rows.min(top.saturating_sub(header_height + 2));
             let extras_end = top.saturating_sub(gap);
             let notice = if notice_rows > 0 {
@@ -1338,35 +1463,61 @@ impl Screen {
             }
             put_line(&mut out, margin, y, &line, content)?;
         }
-        let inner = content.saturating_sub(6);
-        let (text, caret) = self.editor.view(inner);
+        let inner = content - 6;
+        let (texts, caret_row, caret) = self.editor.composer(inner, composer_rows);
         let border = Style::fg(render::LINE);
         let mut top = Line::new();
         top.push("╭", border);
-        top.push("─".repeat(content.saturating_sub(2)), border);
+        if self.planning {
+            top.push("─", border);
+            top.push(
+                " PLAN MODE ",
+                Style::fg(render::CODE).with_bg(render::BRAND).bold(),
+            );
+        }
+        top.push("─".repeat(content.saturating_sub(top.width() + 1)), border);
         top.push("╮", border);
         put_line(&mut out, margin, box_top, &top, content)?;
-        let mut row = Line::new();
-        row.push("│ ", border);
-        row.push("› ", Style::brand());
-        row.push(text.clone(), Style::fg(render::FG));
-        let text_width = text.as_str().width();
-        if text_width < inner {
-            row.push(" ".repeat(inner - text_width), Style::plain());
+        for (index, text) in texts.iter().enumerate() {
+            let mut row = Line::new();
+            row.push("│ ", border);
+            row.push(if index == 0 { "› " } else { "  " }, Style::brand());
+            row.push(text.as_str(), Style::fg(render::FG));
+            row.pad_to(content - 2, Style::plain());
+            row.push(" │", border);
+            put_line(&mut out, margin, box_top + 1 + index, &row, content)?;
         }
-        row.push(" │", border);
-        put_line(&mut out, margin, box_top + 1, &row, content)?;
         let mut foot = Line::new();
         foot.push("╰", border);
         foot.push("─".repeat(content.saturating_sub(2)), border);
         foot.push("╯", border);
-        put_line(&mut out, margin, box_top + 2, &foot, content)?;
+        put_line(
+            &mut out,
+            margin,
+            box_top + composer_rows + 1,
+            &foot,
+            content,
+        )?;
 
-        if menu.is_empty() {
+        if streaming && self.escape.active(Instant::now()) {
             put_line(
                 &mut out,
                 margin,
-                box_top + 3,
+                box_top + composer_rows + 2,
+                &Line::of(
+                    tr!(
+                        "  Esc ещё раз — прервать ответ",
+                        "  Press Esc again to stop the reply"
+                    ),
+                    Style::fg(render::WARN),
+                ),
+                content,
+            )?;
+        } else if menu.is_empty() {
+            put_line(
+                &mut out,
+                margin,
+                box_top + composer_rows + 2,
                 &self.footer(model, content, streaming),
                 content,
             )?;
@@ -1404,7 +1555,7 @@ impl Screen {
                 put_line(
                     &mut out,
                     margin,
-                    box_top + 3 + index - window,
+                    box_top + composer_rows + 2 + index - window,
                     &line,
                     content,
                 )?;
@@ -1412,9 +1563,15 @@ impl Screen {
         }
 
         let column = margin + 4 + caret;
-        queue!(out, MoveTo(column as u16, (box_top + 1) as u16), Show)?;
+        queue!(
+            out,
+            MoveTo(column as u16, (box_top + 1 + caret_row) as u16),
+            Show
+        )?;
         queue!(out, EndSynchronizedUpdate)?;
-        io::stdout().lock().write_all(&out)?;
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(&out)?;
+        stdout.flush()?;
         self.background = out;
         Ok(())
     }
@@ -1436,8 +1593,8 @@ impl Screen {
             )
         } else {
             tr!(
-                "/ команды · esc прервать · ctrl-c выйти",
-                "/ commands · esc to interrupt · ctrl-c to quit"
+                "/ команды · Esc ×2 прервать · Ctrl+C выйти",
+                "/ commands · Esc twice to interrupt · Ctrl+C to quit"
             )
         };
         if !mark {
@@ -1481,16 +1638,21 @@ impl Screen {
     fn model_line(&self, model: &str) -> Line {
         let mut line = Line::new();
         line.push(model, Style::dim());
-        line.push(
-            format!(
-                " · ctx {} · in {} · out {}",
-                render::human(self.context_limit),
-                render::human(self.input_limit),
-                render::human(self.output_limit)
-            ),
-            Style::dim(),
-        );
-        if self.reasoning != super::Reasoning::Off {
+        if self.context_limit > 0 {
+            line.push(
+                format!(
+                    " · ctx {} · in {} · out {}",
+                    render::human(self.context_limit),
+                    render::human(self.input_limit),
+                    render::human(self.output_limit)
+                ),
+                Style::dim(),
+            );
+        }
+        if !matches!(
+            self.reasoning,
+            super::Reasoning::Off | super::Reasoning::ProviderDefault
+        ) {
             line.push(
                 format!(" · r {}", self.reasoning.label()),
                 Style::fg(render::BRAND),
@@ -1501,6 +1663,9 @@ impl Screen {
                 tr!(" · диагностика", " · diagnose"),
                 Style::fg(render::BRAND),
             );
+        }
+        if self.turn.map_or(self.dialog_mode, |turn| turn.mode) == DialogMode::Chat {
+            line.push(format!(" · {}", DialogMode::Chat.label()), Style::dim());
         }
         line
     }
@@ -1554,7 +1719,10 @@ impl Screen {
         head.push("● ", Style::brand());
         head.push(model, Style::fg(render::FG));
         segments.push(head);
-        if self.reasoning != super::Reasoning::Off {
+        if !matches!(
+            self.reasoning,
+            super::Reasoning::Off | super::Reasoning::ProviderDefault
+        ) {
             segments.push(Line::of(
                 format!("r {}", self.reasoning.label()),
                 Style::dim(),
@@ -1564,6 +1732,10 @@ impl Screen {
             segments.push(Line::of(format!("↑{}", self.scroll), Style::dim()));
         }
         join_segments(&segments, width)
+    }
+
+    pub(super) fn reset_stream_escape(&mut self) {
+        self.escape = EscapeGate::default();
     }
 
     fn spinner_line(&self, width: usize) -> Line {
@@ -1581,7 +1753,7 @@ impl Screen {
             let mut line = Line::new();
             line.push("  ", Style::plain());
             line.push(frame, Style::brand());
-            line.push(format!(" {stage}… {elapsed} · Esc"), Style::dim());
+            line.push(format!(" {stage}… {elapsed} · Esc ×2"), Style::dim());
             return line.truncate(width);
         }
         let mut line = Line::new();
@@ -1590,8 +1762,8 @@ impl Screen {
         line.push(format!(" {stage}…"), Style::brand());
         line.push(
             trf!(
-                " ({elapsed} · Esc — прервать)",
-                " ({elapsed} · Esc to interrupt)"
+                " ({elapsed} · Esc ×2 — прервать)",
+                " ({elapsed} · Esc twice to interrupt)"
             ),
             Style::dim(),
         );
@@ -1599,27 +1771,51 @@ impl Screen {
     }
 
     fn status_panel(&mut self, model: &str, directory: &Path) -> Result<()> {
+        let show_limit = |limit| {
+            if limit == 0 {
+                "—".into()
+            } else {
+                render::human(limit)
+            }
+        };
         let used = self
             .input_estimate
             .map_or("—".into(), |used| format!("~{used}"));
         let remaining = self.input_estimate.map_or("—".into(), |used| {
             format!("~{}", self.input_limit.saturating_sub(used))
         });
-        let mode = if self.diagnose {
+        let available = self.input_estimate.map_or("—".into(), |used| {
+            format!(
+                "~{}",
+                super::available_output(
+                    self.context_limit,
+                    self.input_limit,
+                    self.output_limit,
+                    used
+                )
+            )
+        });
+        let mode = if self.planning {
+            tr!("планирование", "plan")
+        } else if self.diagnose {
             tr!("диагностика", "diagnose")
         } else {
             tr!("кодинг", "code")
         };
         let rows = [
             (tr!("модель", "model"), model.to_owned()),
-            (tr!("окно", "window"), render::human(self.context_limit)),
+            (tr!("окно", "window"), show_limit(self.context_limit)),
             (
                 tr!("лимит входа", "input limit"),
-                self.input_limit.to_string(),
+                show_limit(self.input_limit),
             ),
-            (tr!("выход", "output"), render::human(self.output_limit)),
+            (
+                tr!("лимит выхода", "output limit"),
+                show_limit(self.output_limit),
+            ),
             (tr!("занято (оценка)", "used (estimate)"), used),
             (tr!("осталось", "remaining"), remaining),
+            (tr!("доступный выход", "available output"), available),
             (
                 tr!("reasoning", "reasoning"),
                 if self.reasoning == super::Reasoning::Off {
@@ -1653,6 +1849,13 @@ impl Screen {
                 trf!("{} запросов", "{} turns", self.stats.turns),
             ),
             (tr!("режим", "mode"), mode.to_owned()),
+            (
+                tr!("диалог", "conversation"),
+                self.turn
+                    .map_or(self.dialog_mode, |turn| turn.mode)
+                    .label()
+                    .into(),
+            ),
             (tr!("проект", "project"), crate::folders::display(directory)),
         ];
         let mut body = Vec::new();
@@ -1890,997 +2093,18 @@ impl Screen {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Field {
-    Name,
-    Protocol,
-    Url,
-    Model,
-    Key,
-    Context,
-    Input,
-    Output,
-    Reasoning,
-    ReasoningApi,
-    ChatOnly,
-    Vision,
-}
-
-impl Field {
-    const ALL: [Self; 12] = [
-        Self::Name,
-        Self::Protocol,
-        Self::Url,
-        Self::Model,
-        Self::Key,
-        Self::Context,
-        Self::Input,
-        Self::Output,
-        Self::Reasoning,
-        Self::ReasoningApi,
-        Self::ChatOnly,
-        Self::Vision,
-    ];
-}
-
-struct ModelForm {
-    index: Option<usize>,
-    name: Editor,
-    url: Editor,
-    model: Editor,
-    key: Editor,
-    context: Editor,
-    input: Editor,
-    output: Editor,
-    anthropic: bool,
-    responses: bool,
-    vision: bool,
-    chat_only: bool,
-    key_url: Option<String>,
-    key_source: Option<usize>,
-    reasoning: super::Reasoning,
-    reasoning_api: super::ReasoningApi,
-    focus: usize,
-    error: Option<String>,
-}
-
-impl ModelForm {
-    fn new(index: Option<usize>, entry: Option<&ModelEntry>) -> Self {
-        let field = |value: &str| Editor::from(value);
-        let limit = |value: Option<u32>| match value.filter(|value| *value != 0) {
-            Some(value) => Editor::from(&value.to_string()),
-            None => Editor::new(),
-        };
-        Self {
-            index,
-            name: field(entry.map(|entry| entry.name.as_str()).unwrap_or("")),
-            url: field(entry.map(|entry| entry.url.as_str()).unwrap_or("")),
-            model: field(entry.map(|entry| entry.model.as_str()).unwrap_or("")),
-            key: field(entry.and_then(|entry| entry.key.as_deref()).unwrap_or("")),
-            context: limit(entry.map(|entry| entry.context)),
-            input: limit(entry.map(|entry| entry.input)),
-            output: limit(entry.map(|entry| entry.output)),
-            anthropic: entry.map(|entry| entry.anthropic).unwrap_or(false),
-            responses: entry.is_some_and(|entry| entry.responses),
-            vision: entry.is_some_and(|entry| entry.vision),
-            chat_only: entry.map(|entry| entry.chat_only).unwrap_or(false),
-            key_url: entry
-                .filter(|entry| entry.key_set)
-                .map(|entry| entry.url.clone()),
-            key_source: entry.and_then(|entry| entry.key_source),
-            reasoning: entry
-                .map(|entry| entry.reasoning)
-                .unwrap_or(super::Reasoning::Off),
-            reasoning_api: entry
-                .map(|entry| entry.reasoning_api)
-                .unwrap_or(super::ReasoningApi::Auto),
-            focus: 0,
-            error: None,
-        }
-    }
-
-    fn saved_key_matches(&self) -> bool {
-        self.key_url
-            .as_deref()
-            .is_some_and(|url| self.url.text().trim().trim_end_matches('/') == url)
-    }
-
-    fn cycle_protocol(&mut self) {
-        (self.anthropic, self.responses) = match (self.anthropic, self.responses) {
-            (false, false) => (true, false),
-            (true, _) => (false, true),
-            _ => (false, false),
-        };
-    }
-
-    fn field(&self) -> Field {
-        Field::ALL[self.focus.min(Field::ALL.len() - 1)]
-    }
-
-    fn focus_row(&self) -> usize {
-        match self.field() {
-            Field::Name => 1,
-            Field::Protocol => 2,
-            Field::Url => 3,
-            Field::Model => 4,
-            Field::Key => 5,
-            Field::Context => 6,
-            Field::Input => 7,
-            Field::Output => 8,
-            Field::Reasoning => 9,
-            Field::ReasoningApi => 10,
-            Field::ChatOnly => 11,
-            Field::Vision => 12,
-        }
-    }
-
-    fn editor_mut(&mut self) -> Option<&mut Editor> {
-        match self.field() {
-            Field::Name => Some(&mut self.name),
-            Field::Url => Some(&mut self.url),
-            Field::Model => Some(&mut self.model),
-            Field::Key => Some(&mut self.key),
-            Field::Context => Some(&mut self.context),
-            Field::Input => Some(&mut self.input),
-            Field::Output => Some(&mut self.output),
-            Field::Protocol
-            | Field::Reasoning
-            | Field::ReasoningApi
-            | Field::ChatOnly
-            | Field::Vision => None,
-        }
-    }
-
-    fn move_focus(&mut self, delta: isize) {
-        let count = Field::ALL.len() as isize;
-        self.focus = ((self.focus as isize + delta).rem_euclid(count)) as usize;
-    }
-
-    fn entry(&self) -> std::result::Result<ModelEntry, String> {
-        self.build_entry(false)
-    }
-    fn build_entry(&self, allow_empty_model: bool) -> std::result::Result<ModelEntry, String> {
-        let name = self.name.text().trim().to_owned();
-        if name.is_empty() && !allow_empty_model {
-            return Err(
-                tr!("Название не может быть пустым", "The name cannot be empty").to_owned(),
-            );
-        }
-        if name.chars().count() > 64 {
-            return Err(tr!(
-                "Название длиннее 64 символов",
-                "The name is longer than 64 characters"
-            )
-            .to_owned());
-        }
-        let url = super::endpoint(self.url.text().trim()).map_err(|error| error.to_string())?;
-        let model = self.model.text().trim().to_owned();
-        if model.is_empty() && !allow_empty_model {
-            return Err(tr!("Укажи ID модели", "Enter the model ID").to_owned());
-        }
-        if model.chars().count() > 160 {
-            return Err(tr!(
-                "ID модели длиннее 160 символов",
-                "The model ID is longer than 160 characters"
-            )
-            .to_owned());
-        }
-        let limit = |editor: &Editor, name: &str, minimum: u32| {
-            if editor.is_empty() {
-                return Ok(0);
-            }
-            editor.text().trim().parse::<u32>()
-                .ok()
-                .filter(|value| (minimum..=10_000_000).contains(value))
-                .ok_or_else(|| trf!(
-                    "{}: укажи целое число от {} до 10 000 000 или оставь поле пустым для авто.",
-                    "{}: enter an integer from {} to 10,000,000 or leave blank for auto.",
-                    name, minimum,
-                ))
-        };
-        let context = limit(&self.context, tr!("Контекст", "Context"), 1256)?;
-        let input = limit(&self.input, tr!("Вход", "Input"), 1000)?;
-        let output = limit(&self.output, tr!("Выход", "Output"), 256)?;
-        if context > 0 && input.saturating_add(output) > context {
-            return Err(tr!(
-                "Вход + выход больше окна контекста",
-                "Input + output exceed the context window"
-            )
-            .to_owned());
-        }
-        if self.anthropic
-            && self.reasoning != super::Reasoning::Off
-            && !matches!(
-                self.reasoning_api,
-                super::ReasoningApi::None
-                    | super::ReasoningApi::Adaptive
-                    | super::ReasoningApi::DeepSeek
-            )
-            && let Some(budget) = self.reasoning.budget()
-            && output > 0
-            && output <= budget
-        {
-            return Err(trf!(
-                "Выход {} должен быть больше бюджета reasoning {}",
-                "Output {} must be greater than the reasoning budget {}",
-                output,
-                budget
-            ));
-        }
-        let key = self.key.text();
-        Ok(ModelEntry {
-            name,
-            url,
-            model,
-            key: (!key.is_empty()).then_some(key),
-            key_set: self.saved_key_matches() || !self.key.is_empty(),
-            key_source: self.key_source,
-            anthropic: self.anthropic,
-            responses: self.responses,
-            vision: self.vision,
-            chat_only: self.chat_only,
-            context,
-            input,
-            output,
-            reasoning: self.reasoning,
-            reasoning_api: self.reasoning_api,
-        })
-    }
-
-    fn lines(&self, inner: usize) -> (Vec<Line>, Option<(usize, usize)>) {
-        let label_width = 12usize;
-        let value_width = inner.saturating_sub(label_width + 2).max(8);
-        let focused = self.field();
-        let mut lines = Vec::new();
-        let mut cursor = None;
-        let label = |field: Field, text: &str| {
-            let style = if field == focused {
-                Style::brand().bold()
-            } else {
-                Style::dim()
-            };
-            let mut line = Line::new();
-            line.push(format!("{text:<label_width$}"), style);
-            line
-        };
-        let push_text = |lines: &mut Vec<Line>,
-                         field: Field,
-                         text: &str,
-                         placeholder: &str,
-                         value: &Editor|
-         -> Option<(usize, usize)> {
-            let mut line = label(field, text);
-            let mut position = None;
-            if field == focused {
-                let (shown, caret) = value.view(value_width);
-                if shown.is_empty() && !placeholder.is_empty() {
-                    line.push(placeholder.to_owned(), Style::dim());
-                } else {
-                    line.push(shown, Style::fg(render::FG).bold());
-                }
-                position = Some((lines.len(), label_width + caret));
-            } else if value.is_empty() && !placeholder.is_empty() {
-                line.push(placeholder.to_owned(), Style::dim());
-            } else {
-                line.push(value.text(), Style::fg(render::FG));
-            }
-            lines.push(line.truncate(inner));
-            position
-        };
-        lines.push(Line::new());
-        if let Some(position) = push_text(
-            &mut lines,
-            Field::Name,
-            tr!("Название", "Name"),
-            tr!("например, OpenAI", "for example OpenAI"),
-            &self.name,
-        ) {
-            cursor = Some(position);
-        }
-        let mut protocol = label(Field::Protocol, tr!("Протокол", "Protocol"));
-        let name = if self.anthropic {
-            "Anthropic Messages"
-        } else if self.responses {
-            "OpenAI Responses"
-        } else {
-            tr!("OpenAI-совместимый", "OpenAI-compatible")
-        };
-        let style = if focused == Field::Protocol {
-            Style::brand().bold()
-        } else {
-            Style::fg(render::FG)
-        };
-        protocol.push(format!("‹ {name} ›"), style);
-        if focused == Field::Protocol {
-            protocol.push(tr!("   ←/→ — сменить", "   ←/→ to change"), Style::dim());
-        }
-        lines.push(protocol.truncate(inner));
-        if let Some(position) = push_text(
-            &mut lines,
-            Field::Url,
-            tr!("Адрес", "Base URL"),
-            "https://api.example.com/v1",
-            &self.url,
-        ) {
-            cursor = Some(position);
-        }
-        if let Some(position) = push_text(
-            &mut lines,
-            Field::Model,
-            tr!("Модель", "Model"),
-            tr!("ID модели провайдера", "provider model ID"),
-            &self.model,
-        ) {
-            cursor = Some(position);
-        }
-        let mut key = label(Field::Key, tr!("API-ключ", "API key"));
-        if focused == Field::Key {
-            let (shown, caret) = self.key.view(value_width);
-            if shown.is_empty() {
-                if self.saved_key_matches() {
-                    key.push(
-                        tr!(
-                            "(сохранён — введи новый, чтобы заменить)",
-                            "(saved — type a new one to replace)"
-                        ),
-                        Style::dim(),
-                    );
-                } else {
-                    key.push(
-                        tr!(
-                            "(пусто для локального сервера)",
-                            "(empty for a local server)"
-                        ),
-                        Style::dim(),
-                    );
-                }
-            } else {
-                key.push(
-                    "•".repeat(shown.chars().count()),
-                    Style::fg(render::FG).bold(),
-                );
-            }
-            cursor = Some((lines.len(), label_width + caret));
-        } else if self.saved_key_matches() {
-            key.push(tr!("сохранён ••••", "saved ••••"), Style::dim());
-        } else if self.key.is_empty() {
-            key.push(tr!("не задан", "not set"), Style::dim());
-        } else {
-            key.push("•".repeat(self.key.text().chars().count()), Style::dim());
-        }
-        lines.push(key.truncate(inner));
-        if let Some(position) = push_text(
-            &mut lines,
-            Field::Context,
-            tr!("Контекст", "Context"),
-            "128000",
-            &self.context,
-        ) {
-            cursor = Some(position);
-        }
-        if let Some(position) = push_text(
-            &mut lines,
-            Field::Input,
-            tr!("Вход", "Input"),
-            tr!("лимит входа, токены", "input limit, tokens"),
-            &self.input,
-        ) {
-            cursor = Some(position);
-        }
-        if let Some(position) = push_text(
-            &mut lines,
-            Field::Output,
-            tr!("Выход", "Output"),
-            tr!("авто · лимит ответа", "auto · reply limit"),
-            &self.output,
-        ) {
-            cursor = Some(position);
-        }
-        let mut reasoning = label(Field::Reasoning, tr!("Reasoning", "Reasoning"));
-        let style = if focused == Field::Reasoning {
-            Style::brand().bold()
-        } else {
-            Style::fg(render::FG)
-        };
-        reasoning.push(format!("‹ {} ›", self.reasoning.label()), style);
-        if focused == Field::Reasoning {
-            reasoning.push(tr!("   ←/→ — сменить", "   ←/→ to change"), Style::dim());
-        }
-        lines.push(reasoning.truncate(inner));
-        let mut api = label(Field::ReasoningApi, tr!("Параметр", "Reasoning API"));
-        let style = if focused == Field::ReasoningApi {
-            Style::brand().bold()
-        } else {
-            Style::fg(render::FG)
-        };
-        api.push(format!("‹ {} ›", self.reasoning_api.label()), style);
-        if focused == Field::ReasoningApi {
-            api.push(tr!("   ←/→ — сменить", "   ←/→ to change"), Style::dim());
-        }
-        lines.push(api.truncate(inner));
-        let mut chat = label(Field::ChatOnly, tr!("Режим", "Mode"));
-        let mark = if self.chat_only { "[ ]" } else { "[x]" };
-        chat.push(
-            format!(
-                "{mark} {}",
-                if self.chat_only {
-                    tr!("только чат, без инструментов", "chat only, no tools")
-                } else {
-                    tr!("агент: файлы и команды", "agent: files and commands")
-                }
-            ),
-            if focused == Field::ChatOnly {
-                Style::brand().bold()
-            } else {
-                Style::fg(render::FG)
-            },
-        );
-        if focused == Field::ChatOnly {
-            chat.push("   Space", Style::dim());
-        }
-        lines.push(chat.truncate(inner));
-        let mut vision = label(Field::Vision, tr!("Изображения", "Images"));
-        vision.push(
-            if self.vision {
-                tr!("вкл", "on")
-            } else {
-                tr!("выкл", "off")
-            },
-            Style::fg(render::FG),
-        );
-        if focused == Field::Vision {
-            vision.push(
-                tr!("  · Пробел — сменить", "  · Space to toggle"),
-                Style::dim(),
-            );
-        }
-        lines.push(vision.truncate(inner));
-        lines.push(Line::new());
-        if let Some(error) = &self.error {
-            lines.push(Line::of(format!("! {error}"), Style::fg(render::WARN)).truncate(inner));
-        } else {
-            lines.push(
-                Line::of(
-                    tr!(
-                        "Проверь адрес и модель: агент обратится к ним сразу.",
-                        "Check the URL and model: the agent uses them right away."
-                    ),
-                    Style::dim(),
-                )
-                .truncate(inner),
-            );
-        }
-        (lines, cursor)
-    }
-}
-
-fn model_lines(
-    entries: &[ModelEntry],
-    selected: usize,
-    active: Option<usize>,
-    error: Option<&str>,
-) -> Vec<Line> {
-    let mut lines = Vec::new();
-    if entries.is_empty() {
-        lines.push(Line::of(
-            tr!("  Моделей нет.", "  No models yet."),
-            Style::fg(render::FG),
-        ));
-        lines.push(Line::of(
-            tr!(
-                "  A — добавить модель или открыть каталог F4 в форме.",
-                "  A adds a model; open the catalog with F4 in the form."
-            ),
-            Style::dim(),
-        ));
-        return lines;
-    }
-    lines.push(Line::of(
-        tr!(
-            "  A  Добавить · N  На том же API · F4  Каталог",
-            "  A  Add model · N  Same connection · F4  Catalog"
-        ),
-        Style::brand(),
-    ));
-    for (index, entry) in entries.iter().enumerate() {
-        let is_selected = index == selected;
-        let mut line = Line::new();
-        line.push("  ", Style::plain());
-        line.push(
-            if is_selected { "›" } else { " " },
-            if is_selected {
-                Style::brand().bold()
-            } else {
-                Style::dim()
-            },
-        );
-        line.push(
-            if Some(index) == active { "●" } else { " " },
-            if Some(index) == active {
-                Style::brand()
-            } else {
-                Style::dim()
-            },
-        );
-        line.push(" ", Style::plain());
-        line.push(
-            entry.name.clone(),
-            if is_selected {
-                Style::brand().bold()
-            } else {
-                Style::fg(render::FG)
-            },
-        );
-        line.push("  ", Style::plain());
-        line.push(entry.model.clone(), Style::dim());
-        lines.push(line);
-        let mut detail = Line::new();
-        detail.push("      ", Style::plain());
-        detail.push(entry.url.clone(), Style::dim());
-        detail.push(" · ", Style::dim());
-        detail.push(
-            if entry.anthropic {
-                "Anthropic"
-            } else {
-                "OpenAI"
-            },
-            Style::dim(),
-        );
-        detail.push(
-            format!(" · ctx {}", render::human(entry.context)),
-            Style::dim(),
-        );
-        detail.push(
-            format!(" · in {}", render::human(entry.input)),
-            Style::dim(),
-        );
-        detail.push(
-            format!(" · out {}", render::human(entry.output)),
-            Style::dim(),
-        );
-        if entry.reasoning != super::Reasoning::Off {
-            detail.push(format!(" · r {}", entry.reasoning.label()), Style::dim());
-        }
-        if entry.chat_only {
-            detail.push(tr!(" · только чат", " · chat only"), Style::dim());
-        }
-        if !entry.key_set {
-            detail.push(tr!(" · без ключа", " · no key"), Style::dim());
-        }
-        lines.push(detail);
-        lines.push(Line::new());
-    }
-    if let Some(error) = error {
-        lines.push(Line::of(format!("! {error}"), Style::fg(render::WARN)));
-    }
-    lines
-}
-
 impl Screen {
-    /// Full-screen "please wait" line used before slow MCP startup.
+    /// A transient panel for a bounded provider or MCP request.
     pub fn busy(&mut self, text: &str) -> Result<()> {
         self.draw_panel(text, "", &[Line::new()], 0, None)?;
         Ok(())
-    }
-
-    /// `/reasoning`: pick a level for the active model.
-    pub fn reasoning(&mut self, current: super::Reasoning) -> Result<Option<super::Reasoning>> {
-        let levels = [
-            super::Reasoning::Off,
-            super::Reasoning::Low,
-            super::Reasoning::Medium,
-            super::Reasoning::High,
-            super::Reasoning::Xhigh,
-            super::Reasoning::Max,
-            super::Reasoning::Ultra,
-        ];
-        let mut selected = levels
-            .iter()
-            .position(|level| *level == current)
-            .unwrap_or(0);
-        loop {
-            let mut body = vec![Line::new()];
-            for (index, level) in levels.iter().enumerate() {
-                let is_selected = index == selected;
-                let mut row = Line::new();
-                row.push("  ", Style::plain());
-                row.push(
-                    if is_selected { "›" } else { " " },
-                    if is_selected {
-                        Style::brand().bold()
-                    } else {
-                        Style::dim()
-                    },
-                );
-                row.push(if *level == current { " ●" } else { "  " }, Style::brand());
-                row.push(" ", Style::plain());
-                row.push(
-                    level.label(),
-                    if is_selected {
-                        Style::brand().bold()
-                    } else {
-                        Style::fg(render::FG)
-                    },
-                );
-                if let Some(budget) = level.budget() {
-                    row.push(format!("  · budget {budget}"), Style::dim());
-                } else {
-                    if *level == super::Reasoning::Off {
-                        row.push(
-                            tr!("  · по умолчанию провайдера", "  · provider default"),
-                            Style::dim(),
-                        );
-                    }
-                }
-                body.push(row);
-            }
-            body.push(Line::new());
-            body.push(Line::of(
-                tr!(
-                    "Уровень хранится в профиле для этой модели. F3 — раскрыть reasoning в истории.",
-                    "The level is saved in the profile for this model. F3 expands reasoning in history."
-                ),
-                Style::dim(),
-            ));
-            self.draw_panel(
-                tr!("Reasoning", "Reasoning"),
-                tr!(
-                    " ↑↓ — выбор · Enter — применить · Esc — отмена ",
-                    " ↑↓ — select · Enter — apply · Esc — cancel "
-                ),
-                &body,
-                0,
-                None,
-            )?;
-            match read_ui_event()? {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    let key = normalize_key(key);
-                    match key.code {
-                        KeyCode::Up => selected = selected.saturating_sub(1),
-                        KeyCode::Down => selected = (selected + 1).min(levels.len() - 1),
-                        KeyCode::Home => selected = 0,
-                        KeyCode::End => selected = levels.len() - 1,
-                        KeyCode::Enter => return Ok(Some(levels[selected])),
-                        KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
-                        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                            return Ok(None);
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// The `/model` screen: list, connect, add, edit and delete saved model
-    /// connections without leaving the alternate screen.
-    pub fn models(
-        &mut self,
-        entries: &[ModelEntry],
-        active: Option<usize>,
-        draft: Option<(Option<usize>, ModelEntry, Option<String>)>,
-    ) -> Result<ModelAction> {
-        let mut selected = active.unwrap_or(0).min(entries.len().saturating_sub(1));
-        let mut form = draft.map(|(index, entry, error)| {
-            let mut form = ModelForm::new(index, Some(&entry));
-            if error.is_some() {
-                form.focus = [entry.context, entry.input, entry.output]
-                    .iter()
-                    .position(|value| *value == 0)
-                    .map_or(5, |index| 5 + index);
-                form.error = error;
-            }
-            form
-        });
-        let mut error: Option<String> = None;
-        let mut form_scroll = 0usize;
-        loop {
-            let term_width = usize::from(terminal::size()?.0);
-            let (title, footer, body, cursor) = if let Some(form) = &form {
-                let width = terminal::size()?.0;
-                let inner = usize::from(width)
-                    .saturating_sub(8)
-                    .clamp(36, 96)
-                    .min(usize::from(width))
-                    .saturating_sub(4);
-                let (lines, cursor) = form.lines(inner);
-                (
-                    if form.index.is_some() {
-                        tr!("Изменить модель", "Edit model")
-                    } else {
-                        tr!("Новая модель", "New model")
-                    },
-                    if term_width >= 72 {
-                        tr!(
-                            " Tab/↑↓ — поле · Space/←→ — тумблер · F4 каталог · F5 авто · Enter сохранить · Esc ",
-                            " Tab/↑↓ — field · Space/←→ — toggle · F4 catalog · F5 auto · Enter save · Esc "
-                        )
-                    } else {
-                        tr!(
-                            " Tab · F4 · F5 · Enter · Esc ",
-                            " Tab · F4 · F5 · Enter · Esc "
-                        )
-                    },
-                    lines,
-                    cursor,
-                )
-            } else {
-                (
-                    tr!("Модели", "Models"),
-                    if term_width >= 72 {
-                        tr!(
-                            " E изменить · D удалить · Enter выбрать · A новая · N на том же API · T тест · F5 авто ",
-                            " E edit · D delete · Enter select · A add · N same API · T test · F5 setup "
-                        )
-                    } else {
-                        tr!(
-                            " A добавить · N ещё · E правка ",
-                            " A add · N another · E edit "
-                        )
-                    },
-                    model_lines(entries, selected, active, error.as_deref()),
-                    None,
-                )
-            };
-            let focus_row = form.as_ref().map(ModelForm::focus_row);
-            if let Some(row) = focus_row {
-                let visible = usize::from(terminal::size()?.1)
-                    .saturating_sub(4)
-                    .min(body.len());
-                if row < form_scroll {
-                    form_scroll = row;
-                } else if row >= form_scroll.saturating_add(visible) {
-                    form_scroll = row.saturating_add(1).saturating_sub(visible);
-                }
-                form_scroll = form_scroll.min(body.len().saturating_sub(visible));
-            } else {
-                let visible = usize::from(terminal::size()?.1).saturating_sub(4);
-                let list_top = if selected == 0 { 0 } else { 1 + selected * 3 };
-                if list_top < form_scroll {
-                    form_scroll = list_top;
-                } else if list_top + 1 >= form_scroll.saturating_add(visible) {
-                    form_scroll = (list_top + 2).saturating_sub(visible);
-                }
-                form_scroll = form_scroll.min(body.len().saturating_sub(visible));
-            }
-            self.draw_panel(title, footer, &body, form_scroll, cursor)?;
-            match read_ui_event()? {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    let key = normalize_key(key);
-                    let mut cancel = false;
-                    if let Some(form) = form.as_mut() {
-                        match key.code {
-                            KeyCode::Esc => {
-                                form.error = None;
-                                cancel = true;
-                            }
-                            KeyCode::Tab | KeyCode::Down => form.move_focus(1),
-                            KeyCode::BackTab | KeyCode::Up => form.move_focus(-1),
-                            KeyCode::F(4) => match form.build_entry(true) {
-                                Ok(entry) => {
-                                    return Ok(ModelAction::Catalog {
-                                        index: form.index,
-                                        entry,
-                                    });
-                                }
-                                Err(message) => form.error = Some(message),
-                            },
-                            KeyCode::F(5) => match form.entry() {
-                                Ok(entry) => {
-                                    return Ok(ModelAction::Auto {
-                                        index: form.index,
-                                        entry,
-                                    });
-                                }
-                                Err(message) => form.error = Some(message),
-                            },
-                            KeyCode::Enter => match form.entry() {
-                                Ok(entry) if entry.missing_limits() => {
-                                    return Ok(ModelAction::Auto {
-                                        index: form.index,
-                                        entry,
-                                    });
-                                }
-                                Ok(entry) => {
-                                    return Ok(ModelAction::Save {
-                                        index: form.index,
-                                        entry,
-                                    });
-                                }
-                                Err(message) => form.error = Some(message),
-                            },
-                            KeyCode::Left => match form.field() {
-                                Field::Protocol => form.cycle_protocol(),
-                                Field::Reasoning => form.reasoning = form.reasoning.next(),
-                                Field::ReasoningApi => {
-                                    form.reasoning_api = form.reasoning_api.next()
-                                }
-                                _ => {
-                                    if let Some(editor) = form.editor_mut() {
-                                        editor.left();
-                                    }
-                                }
-                            },
-                            KeyCode::Right => match form.field() {
-                                Field::Protocol => form.cycle_protocol(),
-                                Field::Reasoning => form.reasoning = form.reasoning.next(),
-                                Field::ReasoningApi => {
-                                    form.reasoning_api = form.reasoning_api.next()
-                                }
-                                _ => {
-                                    if let Some(editor) = form.editor_mut() {
-                                        editor.right();
-                                    }
-                                }
-                            },
-                            KeyCode::Char(' ') if form.field() == Field::Vision => {
-                                form.vision = !form.vision
-                            }
-                            KeyCode::Char(' ') if form.field() == Field::ChatOnly => {
-                                form.chat_only = !form.chat_only;
-                            }
-                            KeyCode::Backspace => {
-                                if let Some(editor) = form.editor_mut() {
-                                    editor.backspace();
-                                }
-                            }
-                            KeyCode::Delete => {
-                                if let Some(editor) = form.editor_mut() {
-                                    editor.delete();
-                                }
-                            }
-                            KeyCode::Home => {
-                                if let Some(editor) = form.editor_mut() {
-                                    editor.home();
-                                }
-                            }
-                            KeyCode::End => {
-                                if let Some(editor) = form.editor_mut() {
-                                    editor.end();
-                                }
-                            }
-                            KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                                cancel = true;
-                            }
-                            KeyCode::Char(character) if key.modifiers == KeyModifiers::CONTROL => {
-                                if let Some(editor) = form.editor_mut() {
-                                    match character {
-                                        'u' => editor.kill_to_start(),
-                                        'k' => editor.kill_to_end(),
-                                        'w' => editor.kill_word(),
-                                        'a' => editor.home(),
-                                        'e' => editor.end(),
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            KeyCode::Char(character)
-                                if key.modifiers == KeyModifiers::NONE
-                                    || key.modifiers == KeyModifiers::SHIFT =>
-                            {
-                                let field = form.field();
-                                if matches!(field, Field::Context | Field::Input | Field::Output)
-                                    && !character.is_ascii_digit()
-                                {
-                                    continue;
-                                }
-                                if let Some(editor) = form.editor_mut() {
-                                    editor.insert([character]);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    if cancel {
-                        form = None;
-                    } else if form.is_none() {
-                        match key.code {
-                            KeyCode::Up => selected = selected.saturating_sub(1),
-                            KeyCode::Down => {
-                                selected = (selected + 1).min(entries.len().saturating_sub(1))
-                            }
-                            KeyCode::Home => selected = 0,
-                            KeyCode::End => {
-                                selected = entries.len().saturating_sub(1);
-                            }
-                            KeyCode::Enter if !entries.is_empty() => {
-                                return Ok(ModelAction::Activate(selected));
-                            }
-                            KeyCode::F(5) if !entries.is_empty() => {
-                                return Ok(ModelAction::Auto {
-                                    index: Some(selected),
-                                    entry: entries[selected].clone(),
-                                });
-                            }
-                            KeyCode::F(4) if !entries.is_empty() => {
-                                return Ok(ModelAction::Duplicate(selected, true));
-                            }
-                            KeyCode::Char('t') if !entries.is_empty() => {
-                                return Ok(ModelAction::Test(selected));
-                            }
-                            KeyCode::Char('n') | KeyCode::Char('т') if !entries.is_empty() => {
-                                return Ok(ModelAction::Duplicate(selected, false));
-                            }
-                            KeyCode::Char('a') | KeyCode::Char('а') | KeyCode::Char('ф') => {
-                                error = None;
-                                form = Some(ModelForm::new(None, None));
-                            }
-                            KeyCode::Char('e') | KeyCode::Char('е') | KeyCode::Char('у')
-                                if !entries.is_empty() =>
-                            {
-                                error = None;
-                                form = Some(ModelForm::new(Some(selected), entries.get(selected)));
-                            }
-                            KeyCode::Char('d') | KeyCode::Char('д') | KeyCode::Char('в')
-                                if !entries.is_empty() =>
-                            {
-                                if entries.len() == 1 {
-                                    error = Some(
-                                        tr!(
-                                            "Нельзя удалить единственную модель",
-                                            "The only model cannot be deleted"
-                                        )
-                                        .to_owned(),
-                                    );
-                                } else {
-                                    let entry = &entries[selected];
-                                    if self.confirm(
-                                        tr!("Удалить модель?", "Delete model?"),
-                                        &format!(
-                                            "{} · {}\n{}\n\n{}",
-                                            entry.name,
-                                            entry.model,
-                                            entry.url,
-                                            tr!(
-                                                "Ключ исчезнет из профиля. Отменить нельзя.",
-                                                "The key will be removed from the profile. This cannot be undone."
-                                            )
-                                        ),
-                                    )? {
-                                        return Ok(ModelAction::Delete(selected));
-                                    }
-                                }
-                            }
-                            KeyCode::Esc | KeyCode::Char('q') => return Ok(ModelAction::Close),
-                            KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                                return Ok(ModelAction::Close);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Event::Paste(text) => {
-                    if let Some(form) = form.as_mut() {
-                        let filtered: String = text
-                            .chars()
-                            .filter(|character| !character.is_control())
-                            .collect();
-                        let filtered: String = if matches!(
-                            form.field(),
-                            Field::Context | Field::Input | Field::Output
-                        ) {
-                            filtered
-                                .chars()
-                                .filter(|character| character.is_ascii_digit())
-                                .collect()
-                        } else {
-                            filtered
-                        };
-                        if let Some(editor) = form.editor_mut() {
-                            editor.insert(filtered.chars());
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 }
 
 pub enum McpAction {
     Close,
     Restart,
+    Approve(usize),
     Import(Vec<usize>),
 }
 
@@ -3083,36 +2307,88 @@ impl Screen {
         self.permission_mode
     }
 
+    pub(super) fn dialog_mode(&self) -> DialogMode {
+        self.dialog_mode
+    }
+
+    pub(super) fn set_dialog_mode(&mut self, mode: DialogMode) {
+        self.dialog_mode = mode;
+    }
+
     pub fn permissions_menu(&mut self) -> Result<()> {
-        use super::permissions::Mode;
-        let modes = Mode::ALL;
-        let choices = modes.map(|mode| {
-            format!(
-                "{} {}",
-                if mode == self.permission_mode {
-                    "●"
-                } else {
-                    " "
-                },
-                mode.label()
-            )
-        });
         let was_approval = std::mem::replace(&mut self.approval_card, true);
-        let selected = self.choose(tr!("Разрешения · F6", "Permissions · F6"), &choices);
-        let selection = selected.and_then(|index| {
-            if let Some(index) = index {
-                let mode = modes[index];
-                if mode != Mode::Full
-                    || self.review_card(mode.label(), mode.description(), false)?
-                {
-                    self.permission_mode = mode;
+        let result = self.edit_permissions();
+        self.approval_card = was_approval;
+        result
+    }
+
+    fn edit_permissions(&mut self) -> Result<()> {
+        use super::permissions::Mode;
+        let entries = [
+            trf!(
+                "Режим диалога · {}",
+                "Conversation · {}",
+                self.dialog_mode.label()
+            ),
+            trf!(
+                "Подтверждение действий · {}",
+                "Action approvals · {}",
+                self.permission_mode.label()
+            ),
+        ];
+        match self.choose(tr!("Разрешения · F6", "Permissions · F6"), &entries)? {
+            Some(0) => {
+                let modes = DialogMode::ALL;
+                let choices = modes.map(|mode| {
+                    format!(
+                        "{} {}",
+                        if mode == self.dialog_mode { "●" } else { " " },
+                        mode.label()
+                    )
+                });
+                if let Some(index) = self.choose(
+                    tr!("Режим текущего диалога", "Current conversation mode"),
+                    &choices,
+                )? {
+                    self.dialog_mode = modes[index];
+                    if self.turn.is_some_and(|turn| turn.mode != self.dialog_mode) {
+                        self.notice(&trf!(
+                            "{} · со следующего сообщения.",
+                            "{} · applies to the next message.",
+                            self.dialog_mode.label()
+                        ));
+                    } else {
+                        self.notice(self.dialog_mode.label());
+                    }
                 }
             }
-            Ok(())
-        });
-        self.approval_card = was_approval;
-        selection?;
-        self.notice(self.permission_mode.label());
+            Some(1) => {
+                let modes = Mode::ALL;
+                let choices = modes.map(|mode| {
+                    format!(
+                        "{} {}",
+                        if mode == self.permission_mode {
+                            "●"
+                        } else {
+                            " "
+                        },
+                        mode.label()
+                    )
+                });
+                if let Some(index) =
+                    self.choose(tr!("Подтверждение действий", "Action approvals"), &choices)?
+                {
+                    let mode = modes[index];
+                    if mode != Mode::Full
+                        || self.review_card(mode.label(), mode.description(), false)?
+                    {
+                        self.permission_mode = mode;
+                        self.notice(mode.label());
+                    }
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -3137,6 +2413,74 @@ impl Screen {
         } else {
             Ok(false)
         }
+    }
+
+    pub(super) fn choose_theme(&mut self, current: theme::Theme) -> Result<Option<theme::Theme>> {
+        let mut selected = theme::Theme::ALL
+            .iter()
+            .position(|&item| item == current)
+            .unwrap_or_default();
+        loop {
+            let rows: Vec<_> = theme::Theme::ALL
+                .iter()
+                .enumerate()
+                .map(|(index, &item)| {
+                    let mut line = Line::of(
+                        if index == selected { " › " } else { "   " },
+                        Style::plain(),
+                    );
+                    line.push(if item == current { "● " } else { "  " }, Style::plain());
+                    line.push(item.label(), item.preview(Style::brand().bold()));
+                    line.push("  ", Style::plain());
+                    line.push(
+                        " code ",
+                        item.preview(Style::fg(render::CODEFG).with_bg(render::CODE)),
+                    );
+                    line
+                })
+                .collect();
+            self.draw_panel(
+                tr!("Тема агента", "Agent theme"),
+                tr!(
+                    " ↑↓ Выбор · Enter Применить · Esc Назад ",
+                    " ↑↓ Select · Enter Apply · Esc Back "
+                ),
+                &rows,
+                selected.saturating_sub(1),
+                None,
+            )?;
+            if let Event::Key(key) = read_ui_event()? {
+                match key.code {
+                    KeyCode::Up => selected = selected.saturating_sub(1),
+                    KeyCode::Down => selected = (selected + 1).min(theme::Theme::ALL.len() - 1),
+                    KeyCode::Enter => return Ok(Some(theme::Theme::ALL[selected])),
+                    KeyCode::Esc => return Ok(None),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    pub(super) fn set_theme(&mut self, selected: theme::Theme) {
+        self.theme = selected;
+        theme::set(selected);
+        self.cache = None;
+        self.background.clear();
+        self.panel_frame = None;
+    }
+
+    pub(super) fn toggle_header(&mut self) {
+        self.header_hidden = !self.header_hidden;
+        self.cache = None;
+    }
+
+    pub(super) fn set_planning(&mut self, planning: bool) {
+        self.planning = planning;
+    }
+
+    pub(super) fn review_plan(&mut self, text: &str) -> Result<bool> {
+        let title = tr!("Перейти к реализации?", "Switch to coding mode?");
+        self.review_card(title, text, false)
     }
 
     pub fn review(&mut self, title: &str, text: &str) -> Result<bool> {
@@ -3166,10 +2510,17 @@ impl Screen {
         loop {
             let panel = self.draw_panel(
                 title,
-                tr!(
-                    " Enter — подтвердить · Esc — отмена · F6 — разрешения · ↑↓ — прокрутка ",
-                    " Enter confirm · Esc cancel · F6 permissions · ↑↓ scroll "
-                ),
+                if permissions_shortcut {
+                    tr!(
+                        " Enter — подтвердить · Esc — отмена · F6 — разрешения · ↑↓ — прокрутка ",
+                        " Enter confirm · Esc cancel · F6 permissions · ↑↓ scroll "
+                    )
+                } else {
+                    tr!(
+                        " Enter — подтвердить · Esc — назад · ↑↓ — прокрутка ",
+                        " Enter confirm · Esc back · ↑↓ scroll "
+                    )
+                },
                 &lines,
                 scroll,
                 None,
@@ -3442,6 +2793,8 @@ impl Screen {
                         row.push("  ", Style::plain());
                         let detail = if server.running {
                             trf!("{} инстр.", "{} tools", server.tools)
+                        } else if server.pending.is_some() {
+                            tr!("требуется согласие", "approval required").to_owned()
                         } else if let Some(error) = &server.error {
                             trf!("ошибка: {}", "error: {}", error)
                         } else {
@@ -3466,8 +2819,8 @@ impl Screen {
                     (
                         tr!("MCP-серверы", "MCP servers"),
                         tr!(
-                            " ↑↓ — выбор · Enter — инструменты · r — перезапуск · i — импорт · Esc — закрыть ",
-                            " ↑↓ — select · Enter — tools · r — restart · i — import · Esc — close "
+                            " Enter — открыть · r — перезапуск · i — импорт · Esc — закрыть ",
+                            " Enter — open · r — restart · i — import · Esc — close "
                         ),
                         lines,
                     )
@@ -3478,7 +2831,7 @@ impl Screen {
                     if let Some(server) = server {
                         let matching: Vec<_> = tools
                             .iter()
-                            .filter(|tool| tool.server == server.name)
+                            .filter(|tool| server.running && tool.server == server.name)
                             .collect();
                         if matching.is_empty() {
                             lines.push(Line::of(
@@ -3573,6 +2926,11 @@ impl Screen {
                     )
                 }
             };
+            if matches!(mode, Mode::Servers) {
+                selected = selected.min(servers.len().saturating_sub(1));
+                let visible = usize::from(terminal::size()?.1).saturating_sub(4).max(2);
+                scroll = scroll.clamp(selected.saturating_add(1).saturating_sub(visible), selected);
+            }
             self.draw_panel(title, footer, &body, scroll, None)?;
             match read_ui_event()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -3585,9 +2943,14 @@ impl Screen {
                             }
                             KeyCode::Home => selected = 0,
                             KeyCode::End => selected = servers.len().saturating_sub(1),
-                            KeyCode::Enter if !servers.is_empty() => {
-                                mode = Mode::Tools(selected);
-                                scroll = 0;
+                            KeyCode::Enter => {
+                                if let Some(server) = servers.get(selected) {
+                                    if let Some(pending) = server.pending {
+                                        return Ok(McpAction::Approve(pending));
+                                    }
+                                    mode = Mode::Tools(selected);
+                                    scroll = 0;
+                                }
                             }
                             KeyCode::Char('r') | KeyCode::Char('р') | KeyCode::Char('к') => {
                                 return Ok(McpAction::Restart);
@@ -3667,6 +3030,10 @@ impl Screen {
 
 impl Drop for Screen {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        if self.enhanced_keys {
+            let _ = execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
+        }
         let _ = execute!(
             io::stdout(),
             DisableMouseCapture,
@@ -3733,8 +3100,9 @@ fn put_line(out: &mut impl Write, x: usize, y: usize, line: &Line, width: usize)
             continue;
         }
         remaining = remaining.saturating_sub(text.as_str().width());
-        if span.style != current {
-            apply_style(out, span.style, &mut current)?;
+        let style = theme::resolve(span.style);
+        if style != current {
+            apply_style(out, style, &mut current)?;
         }
         queue!(out, Print(text))?;
     }
@@ -4024,6 +3392,13 @@ fn help_lines() -> Vec<Line> {
         tr!("приложить текстовый файл", "attach a text file"),
     ));
     lines.push(row("Enter", tr!("отправить", "send")));
+    lines.push(row(
+        "Shift/Ctrl+Enter",
+        tr!(
+            "новая строка (запасной вариант: Ctrl+J)",
+            "new line (fallback: Ctrl+J)"
+        ),
+    ));
     lines.push(row("Tab", tr!("дополнить команду", "complete a command")));
     lines.push(row(
         "↑ / ↓",
@@ -4035,8 +3410,8 @@ fn help_lines() -> Vec<Line> {
     lines.push(row(
         "Esc",
         tr!(
-            "остановить ответ, закрыть меню или очистить ввод",
-            "stop the reply, close the menu or clear the input"
+            "дважды за 7 с — прервать ответ; один раз — закрыть меню или очистить ввод",
+            "twice within 7 s to stop a reply; once to close menus or clear input"
         ),
     ));
     lines.push(row(
@@ -4096,6 +3471,11 @@ mod tests {
         let filtered = menu_items("/st", false, false);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0, "/status");
+        assert!(
+            menu_items("/co", false, false)
+                .iter()
+                .any(|(name, _)| *name == "/continue")
+        );
         assert!(menu_items("/", true, false).is_empty());
         assert!(menu_items("/", false, true).is_empty());
         assert!(menu_items("/help me", false, false).is_empty());
@@ -4119,6 +3499,12 @@ mod tests {
             menu_closed: false,
             armed: false,
             diagnose: false,
+            planning: false,
+            header_hidden: false,
+            escape: EscapeGate::default(),
+            #[cfg(unix)]
+            enhanced_keys: false,
+            theme: theme::Theme::Sage,
             tick: 0,
             turn: None,
             stats: Stats::default(),
@@ -4135,8 +3521,22 @@ mod tests {
             viewport: None,
             selection: None,
             permission_mode: crate::native::permissions::Mode::Ask,
+            dialog_mode: crate::native::permissions::DialogMode::Agent,
             approval_card: false,
         }
+    }
+
+    #[test]
+    fn switching_dialog_modes_during_a_turn_updates_only_the_next_turn() {
+        let mut screen = test_screen();
+        screen.begin_turn(Instant::now());
+        screen.set_dialog_mode(DialogMode::Chat);
+        assert_eq!(screen.turn.unwrap().mode, DialogMode::Agent);
+        let _ = screen.finish_turn();
+        screen.begin_turn(Instant::now());
+        assert_eq!(screen.turn.unwrap().mode, DialogMode::Chat);
+        screen.reset_conversation();
+        assert_eq!(screen.dialog_mode(), DialogMode::Agent);
     }
 
     #[test]
@@ -4256,6 +3656,46 @@ mod tests {
     }
 
     #[test]
+    fn enter_modifiers_insert_lines_and_keep_the_caret_visible() {
+        for mods in [KeyModifiers::SHIFT, KeyModifiers::CONTROL] {
+            assert!(newline_key(KeyEvent::new(KeyCode::Enter, mods)));
+        }
+        assert!(!newline_key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE
+        )));
+        assert!(newline_key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL
+        )));
+        let mut editor = Editor::from("/theme界");
+        editor.left();
+        editor.insert(['\n']);
+        assert_eq!(editor.text(), "/theme\n界");
+        assert!(!super::super::slash_command(&editor.text()));
+        assert_eq!(
+            editor.composer(8, 2),
+            (vec!["/theme".into(), "界".into()], 1, 0)
+        );
+        assert_eq!(editor.composer(8, 1).1, 0);
+    }
+
+    #[test]
+    fn escape_requires_two_presses_before_the_seven_second_deadline() {
+        let t = Instant::now();
+        let mut gate = EscapeGate::default();
+        assert!(!gate.press(t, true));
+        assert!(!gate.press(t + Duration::from_secs(1), true));
+        gate.held = false;
+        assert!(gate.press(t + Duration::from_secs(6), true));
+        let mut gate = EscapeGate::default();
+        assert!(!gate.press(t, false));
+        assert!(!gate.active(t + Duration::from_secs(7)));
+        assert!(!gate.press(t + Duration::from_secs(7), false));
+        assert!(gate.press(t + Duration::from_secs(8), false));
+    }
+
+    #[test]
     fn pasted_newlines_stay_in_the_draft() {
         assert_eq!(paste_text("a\r\nb\tc\x07"), "a\nb c");
     }
@@ -4313,38 +3753,5 @@ mod tests {
         assert!(!compact_text.iter().any(|line| line.contains("four")));
         assert!(full_text.iter().any(|line| line.contains("four")));
         assert!(!full_text.iter().any(|line| line.contains("+1")));
-    }
-
-    #[test]
-    fn model_form_rejects_over_budget_limits() {
-        let mut form = ModelForm::new(None, None);
-        form.name = Editor::from("Test");
-        form.url = Editor::from("https://example.org/v1");
-        form.model = Editor::from("model");
-        form.context = Editor::from("10000");
-        form.input = Editor::from("9000");
-        form.output = Editor::from("2000");
-        assert!(form.entry().is_err());
-        form.output = Editor::from("1000");
-        assert!(form.entry().is_ok());
-    }
-
-    #[test]
-    fn anthropic_reasoning_requires_larger_output() {
-        let mut form = ModelForm::new(None, None);
-        form.name = Editor::from("Test");
-        form.url = Editor::from("https://example.org/v1");
-        form.model = Editor::from("model");
-        form.anthropic = true;
-        form.context = Editor::from("10000");
-        form.input = Editor::from("5000");
-        form.output = Editor::from("4000");
-        form.reasoning = crate::native::Reasoning::High;
-        assert!(form.entry().is_err());
-        form.output = Editor::from("5000");
-        assert!(form.entry().is_ok());
-        form.reasoning_api = crate::native::ReasoningApi::None;
-        form.output = Editor::from("4000");
-        assert!(form.entry().is_ok());
     }
 }

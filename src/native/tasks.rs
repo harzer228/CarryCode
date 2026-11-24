@@ -355,10 +355,12 @@ fn limited_output(mut file: std::fs::File) -> Result<String> {
     let truncated = bytes.len() > 32 * 1024;
     bytes.truncate(32 * 1024);
     let decoded = if bytes.starts_with(&[0xff, 0xfe]) {
+        let (pairs, _) = bytes[2..].as_chunks::<2>();
         String::from_utf16_lossy(
-            &bytes[2..]
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            &pairs
+                .iter()
+                .copied()
+                .map(u16::from_le_bytes)
                 .collect::<Vec<_>>(),
         )
     } else {
@@ -542,6 +544,22 @@ mod tests {
         let xml = "#< CLIXML\n<Objs><S S=\"progress\">Module loading</S><S S=\"Error\">Cyrillic: ошибка_x000D__x000A_</S></Objs>";
         assert_eq!(clixml(xml), "Cyrillic: ошибка\n");
     }
+
+    #[test]
+    fn command_output_decodes_utf16_le_and_ignores_an_incomplete_code_unit() -> Result<()> {
+        use std::io::Write as _;
+
+        let mut file = tempfile::tempfile()?;
+        file.write_all(&[0xff, 0xfe])?;
+        let output = "Привет 🌿\n";
+        for unit in output.encode_utf16() {
+            file.write_all(&unit.to_le_bytes())?;
+        }
+        file.write_all(&[0xff])?;
+        assert_eq!(limited_output(file)?, output);
+        Ok(())
+    }
+
     #[test]
     fn legacy_chain_rewrites_only_simple_commands() {
         let command = legacy_chain("python --version && echo shell-ok").unwrap();

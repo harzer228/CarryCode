@@ -80,7 +80,12 @@ fn selectable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn create_folder(parent: &Path, name: &str) -> Result<PathBuf> {
+fn new_folder_path(parent: &Path, input: &str) -> Result<PathBuf> {
+    let name = input.trim();
+    // A pasted `\name` in this dialog means one child, not a drive-root path.
+    // Strip at most one separator: UNC and nested paths must still be rejected.
+    #[cfg(windows)]
+    let name = name.strip_prefix(['\\', '/']).unwrap_or(name);
     let mut parts = Path::new(name).components();
     ensure!(
         !name.contains(['/', '\\', ':'])
@@ -89,9 +94,59 @@ fn create_folder(parent: &Path, name: &str) -> Result<PathBuf> {
         "{}",
         tr!("Введи имя одной папки", "Enter a single folder name")
     );
-    let path = parent.join(name);
-    fs::create_dir(&path)?;
-    Ok(path)
+    #[cfg(windows)]
+    {
+        let stem = name
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(' ')
+            .to_ascii_uppercase();
+        let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || stem
+                .strip_prefix("COM")
+                .or_else(|| stem.strip_prefix("LPT"))
+                .is_some_and(|suffix| {
+                    matches!(
+                        suffix,
+                        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                    )
+                });
+        ensure!(
+            !device
+                && !name.ends_with('.')
+                && !name.contains(['<', '>', '"', '|', '?', '*'])
+                && !name.chars().any(char::is_control),
+            "{}",
+            tr!(
+                "Windows не поддерживает такое имя папки.",
+                "Windows does not support this folder name."
+            )
+        );
+    }
+    Ok(parent.join(name))
+}
+
+fn create_folder(parent: &Path, name: &str) -> Result<PathBuf> {
+    let path = new_folder_path(parent, name)?;
+    match fs::create_dir(&path) {
+        Ok(()) => Ok(path),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => anyhow::bail!(
+            "{}",
+            tr!(
+                "Это имя уже занято. Введи другое.",
+                "This name is already taken. Enter another."
+            )
+        ),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Err(error).context(tr!(
+            "Нет прав на создание папки в этом месте",
+            "No permission to create a folder here"
+        )),
+        Err(error) => Err(error).context(tr!(
+            "Не удалось создать папку",
+            "Could not create the folder"
+        )),
+    }
 }
 
 fn visible(value: &OsStr) -> String {
@@ -122,4 +177,49 @@ pub fn display(path: &Path) -> String {
         }
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_folder_matches_preview_and_keeps_existing_entries() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = new_folder_path(root.path(), "Новый проект")?;
+        assert!(!path.exists());
+        assert_eq!(create_folder(root.path(), "Новый проект")?, path);
+        assert!(path.is_dir());
+        assert!(create_folder(root.path(), "Новый проект").is_err());
+        fs::write(root.path().join("occupied"), b"data")?;
+        assert!(create_folder(root.path(), "occupied").is_err());
+        assert_eq!(fs::read(root.path().join("occupied"))?, b"data");
+        for name in ["", " ", ".", "..", "../outside", "a/b", "a\\b", "D:folder"] {
+            assert!(new_folder_path(root.path(), name).is_err(), "{name:?}");
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_single_leading_separator_creates_a_child_not_a_root_path() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let expected = root.path().join("Test");
+        assert_eq!(new_folder_path(root.path(), "/Test")?, expected);
+        assert_eq!(create_folder(root.path(), r"\Test")?, expected);
+        assert!(expected.is_dir());
+        for name in [
+            r"\\server\share",
+            r"\..",
+            r"\parent\child",
+            r"C:\Test",
+            "NUL.txt",
+            "COM¹",
+            "name.",
+            "bad*",
+        ] {
+            assert!(new_folder_path(root.path(), name).is_err(), "{name:?}");
+        }
+        Ok(())
+    }
 }
