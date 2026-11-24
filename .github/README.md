@@ -1,9 +1,9 @@
 <div align="center">
   <h1><img src="media/banner.png" alt="CarryCode. Fix problems. Code anywhere." width="100%"></h1>
   <p>
-    <a href="https://github.com/harzer228/CarryCode/releases/download/v0.1.0-beta.6.2/CarryCode-Lite-Setup-Windows-x64.exe"><strong>Windows Lite</strong></a>
-    · <a href="https://github.com/harzer228/CarryCode/releases/download/v0.1.0-beta.6.2/CarryCode-Full-Setup-Windows-x64.exe"><strong>Windows Full</strong></a>
-    · <a href="https://github.com/harzer228/CarryCode/releases/tag/v0.1.0-beta.6.2">Portable ZIPs, release notes and SHA-256</a>
+    <a href="https://github.com/harzer228/CarryCode/releases/download/v0.1.0-beta.6.3/CarryCode-Lite-Setup-Windows-x64.exe"><strong>Windows Lite</strong></a>
+    · <a href="https://github.com/harzer228/CarryCode/releases/download/v0.1.0-beta.6.3/CarryCode-Full-Setup-Windows-x64.exe"><strong>Windows Full</strong></a>
+    · <a href="https://github.com/harzer228/CarryCode/releases/tag/v0.1.0-beta.6.3">Portable ZIPs, release notes and SHA-256</a>
     · <a href="../README.md">На русском</a>
     · <a href="../CHANGELOG.md">Changelog</a>
   </p>

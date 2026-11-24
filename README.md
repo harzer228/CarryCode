@@ -164,7 +164,7 @@ CarryCode пригодится, если ты работаешь с кодом �
 - **Lite** — лаунчер и встроенный CarryCode Agent. Для работы агента нужны подключение к провайдеру и интернет.
 - **Full** — то же, плюс Codex CLI и OpenCode для Windows и Linux.
 
-[Скачать CarryCode 0.1.0-beta.6.2](https://github.com/harzer228/CarryCode/releases/tag/v0.1.0-beta.6.2). Это бета-версия, возможны баги.
+[Скачать CarryCode beta 6.3](https://github.com/harzer228/CarryCode/releases/tag/v0.1.0-beta.6.3). Это бета-версия, возможны баги.
 
 1. Скачай установщик Windows или переносимый ZIP и проверь SHA-256. Установи или распакуй комплект в папку на USB, например `F:\CarryCode`. [Последний выпуск](https://github.com/harzer228/flashGPT/releases/latest)
 2. Открой `flashGPT.exe` в Windows или запусти `./flashgpt` из каталога комплекта в терминале Linux. Создай и запомни пароль профиля или введи прежний.
@@ -263,7 +263,7 @@ cargo run --locked -p xtask -- package
 
 Результат появится в `dist/`. Для upstream-клиентов действуют их лицензии из `licenses/`.
 
-Чтобы собрать установщики, сначала выполни `xtask package` и `xtask package-lite`. Затем запусти в PowerShell на Windows `./installer/build.ps1 -Version 0.1.0-beta.6.2`. Inno Setup создаст Lite и Full EXE с отдельными контрольными суммами в `dist/`.
+Чтобы собрать установщики, сначала выполни `xtask package` и `xtask package-lite`. Затем запусти в PowerShell на Windows `./installer/build.ps1 -Version 0.1.0-beta.6.3`. Inno Setup создаст Lite и Full EXE с отдельными контрольными суммами в `dist/`.
 
 ## Quick start
 
