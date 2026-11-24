@@ -55,7 +55,8 @@ fn main() -> Result<()> {
         Some("build") if arguments.len() <= 2 => {
             build(repo, &dist, arguments.get(1).map(String::as_str))
         }
-        Some("package") if arguments.len() == 1 => package(repo, &dist),
+        Some("package") if arguments.len() == 1 => package(repo, &dist, false),
+        Some("package-lite") if arguments.len() == 1 => package(repo, &dist, true),
         _ => bail!("Usage: cargo run -p xtask -- prepare | build [target] | package"),
     }
 }
@@ -327,7 +328,7 @@ fn build(repo: &Path, dist: &Path, target: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn package(repo: &Path, dist: &Path) -> Result<()> {
+fn package(repo: &Path, dist: &Path, lite: bool) -> Result<()> {
     let mut files = Vec::new();
     for (platform, name) in LAUNCHERS {
         files.push((
@@ -337,7 +338,9 @@ fn package(repo: &Path, dist: &Path) -> Result<()> {
         ));
     }
     let runtime = dist.join("runtime");
-    collect(&runtime, Path::new("bin"), &mut files)?;
+    if !lite {
+        collect(&runtime, Path::new("bin"), &mut files)?;
+    }
     files.push((
         "manifests/runtime.json".into(),
         runtime.join("runtime.json"),
@@ -353,7 +356,11 @@ fn package(repo: &Path, dist: &Path) -> Result<()> {
         false,
     ));
     files.sort_by(|a, b| a.0.cmp(&b.0));
-    let name = "flashgpt-usb-amd64.zip";
+    let name = if lite {
+        "carrycode-lite-amd64.zip"
+    } else {
+        "flashgpt-usb-amd64.zip"
+    };
     let mut draft = tempfile::NamedTempFile::new_in(dist)?;
     let mut zip = ZipWriter::new(BufWriter::new(draft.as_file_mut()));
     for (name, path, executable) in files {
@@ -370,7 +377,14 @@ fn package(repo: &Path, dist: &Path) -> Result<()> {
     draft.as_file().sync_all()?;
     draft.persist(dist.join(name))?;
     let sha = hash(&dist.join(name))?;
-    fs::write(dist.join("SHA256SUMS"), format!("{sha}  {name}\n"))?;
+    fs::write(
+        dist.join(if lite {
+            "SHA256SUMS-lite"
+        } else {
+            "SHA256SUMS"
+        }),
+        format!("{sha}  {name}\n"),
+    )?;
     println!("{}", dist.join(name).display());
     Ok(())
 }

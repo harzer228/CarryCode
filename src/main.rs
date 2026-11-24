@@ -16,6 +16,7 @@ mod bundle;
 mod diagnostics;
 mod folders;
 mod language;
+mod native;
 mod platform;
 mod profile;
 mod recent;
@@ -151,7 +152,8 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
             "{}",
             tr!("Пароль профиля сохранён.", "Profile password saved.")
         );
-        if let Some(agent) = onboard()?
+        if resolve_root()?.join("bin").is_dir()
+            && let Some(agent) = onboard()?
             && let Err(error) = run_agent(
                 &resolve_root,
                 staged,
@@ -173,8 +175,8 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
         println!(
             "{}",
             trf!(
-                "\n1  Кодить с Codex\n2  Кодить с OpenCode\n3  Разобраться с проблемой\n4  Проверить флешку и соединение\n5  Автозапуск: {startup}\n6  Язык / Language\n7  Сменить пароль\n0  Выйти\n",
-                "\n1  Code with Codex\n2  Code with OpenCode\n3  Troubleshoot a problem\n4  Check drive and connection\n5  Autostart: {startup}\n6  Language / Язык\n7  Change password\n0  Exit\n"
+                "\n8  CarryCode Agent (alpha)\n1  Кодить с Codex\n2  Кодить с OpenCode\n3  Разобраться с проблемой\n4  Проверить флешку и соединение\n5  Автозапуск: {startup}\n6  Язык / Language\n7  Сменить пароль\n0  Выйти\n",
+                "\n8  CarryCode Agent (alpha)\n1  Code with Codex\n2  Code with OpenCode\n3  Troubleshoot a problem\n4  Check drive and connection\n5  Autostart: {startup}\n6  Language / Язык\n7  Change password\n0  Exit\n"
             )
         );
         match prompt(tr!("Выбери пункт: ", "Choose an option: "))?.as_deref() {
@@ -279,6 +281,23 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                     eprintln!("CarryCode: {error:#}");
                 }
             }
+            Some("8") => {
+                let result = (|| -> Result<()> {
+                    let root = resolve_root()?;
+                    profile.set_root(&root)?;
+                    if let Some(directory) = folders::pick(&workspace, &root, &profile.recent)? {
+                        workspace = directory;
+                        profile.recent.remember(&root, &workspace);
+                        let result = native::run(&mut profile, &root, &workspace);
+                        finish_profile(&mut profile, &resolve_root)?;
+                        result?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    eprintln!("CarryCode: {error:#}");
+                }
+            }
             Some("7") => match profile.change_password(&resolve_root) {
                 Ok(profile::PasswordChange::Canceled) => {}
                 Ok(profile::PasswordChange::Saved) => println!(
@@ -361,6 +380,14 @@ fn run_agent(
 ) -> Result<()> {
     platform::require_standard_user()?;
     let root = resolve_root()?;
+    ensure!(
+        root.join("bin").is_dir(),
+        "{}",
+        tr!(
+            "Codex и OpenCode входят в Full. В Lite выбери пункт 8 — CarryCode Agent.",
+            "Codex and OpenCode are included in Full. In Lite, choose 8 — CarryCode Agent."
+        )
+    );
     profile.set_root(&root)?;
     let Some(directory) = folders::pick(workspace, &root, &profile.recent)? else {
         return Ok(());

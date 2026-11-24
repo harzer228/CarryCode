@@ -4,10 +4,13 @@
 #ifndef BundleDir
   #error Pass /DBundleDir=<extracted release ZIP>
 #endif
+#ifndef Edition
+  #error Pass /DEdition=Lite or Full
+#endif
 
 [Setup]
 AppId=flashGPT.Portable
-AppName=CarryCode
+AppName=CarryCode {#Edition}
 AppVersion={#AppVersion}
 AppPublisher=CarryCode contributors
 AppPublisherURL=https://github.com/harzer228/flashGPT
@@ -17,7 +20,9 @@ DisableProgramGroupPage=yes
 AppendDefaultDirName=no
 DirExistsWarning=yes
 PrivilegesRequired=lowest
-Uninstallable=no
+Uninstallable=yes
+UninstallDisplayName=CarryCode {#Edition}
+UninstallDisplayIcon={app}\flashGPT.exe
 CloseApplications=no
 ArchitecturesAllowed=x64os
 SetupArchitecture=x64
@@ -25,7 +30,7 @@ MinVersion=10.0.22000
 SetupIconFile=..\assets\flashgpt.ico
 WizardStyle=modern
 Compression=lzma2/fast
-OutputBaseFilename=flashGPT-setup-windows-x64
+OutputBaseFilename=CarryCode-{#Edition}-Setup-Windows-x64
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

@@ -683,6 +683,33 @@ fn extract(
 }
 
 #[cfg(test)]
+pub(crate) fn restore_test_agent_state(legacy: &[u8]) -> Result<tempfile::TempDir> {
+    let source = tempfile::tempdir()?;
+    let path = source.path().join("oc-state/carrycode-agent/state.json");
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(path, legacy)?;
+
+    let secret = SecretString::from("synthetic migration password".to_owned());
+    let destination = tempfile::tempdir()?;
+    let snapshot = destination.path().join("legacy.age");
+    write_snapshot(
+        source.path(),
+        &secret,
+        "migration-test",
+        1,
+        &RecentFolders::default(),
+        &mut File::create(&snapshot)?,
+    )?;
+    extract(
+        &snapshot,
+        &secret,
+        "migration-test",
+        Some(destination.path()),
+    )?;
+    Ok(destination)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -693,6 +720,11 @@ mod tests {
         fs::create_dir_all(work.join("codex"))?;
         fs::create_dir_all(work.join("oc-data/opencode"))?;
         fs::create_dir_all(work.join("tmp"))?;
+        fs::create_dir_all(work.join("oc-state/carrycode-agent"))?;
+        fs::write(
+            work.join("oc-state/carrycode-agent/state.json"),
+            b"synthetic-agent-state",
+        )?;
         fs::write(work.join("codex/auth.json"), b"synthetic-token")?;
         fs::write(work.join("oc-data/opencode/opencode.db"), b"synthetic-db")?;
         fs::write(work.join("tmp/private.txt"), b"session scratch")?;
@@ -718,6 +750,10 @@ mod tests {
         assert_eq!(
             fs::read(destination.join("oc-data/opencode/opencode.db"))?,
             b"synthetic-db"
+        );
+        assert_eq!(
+            fs::read(destination.join("oc-state/carrycode-agent/state.json"))?,
+            b"synthetic-agent-state"
         );
         assert!(!destination.join("tmp").exists());
         assert!(extract(&file, &secret, "other-marker", None).is_err());

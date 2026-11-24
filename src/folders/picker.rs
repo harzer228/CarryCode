@@ -1,4 +1,4 @@
-use super::{accessible, create_folder, display, list, selectable, visible};
+use super::{accessible, create_folder, display, list, new_folder_path, selectable, visible};
 use crate::recent::RecentFolders;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -365,14 +365,28 @@ impl Picker<'_> {
             (field, KeyCode::Enter) => {
                 let value = editor.value();
                 let value = value.trim();
+                if field == Field::Create {
+                    match create_folder(&self.current, value) {
+                        Ok(path) => {
+                            if let Err(error) = self.open_folder(&path) {
+                                self.notice = Some(trf!(
+                                    "Папка создана, но не открылась: {error}",
+                                    "Folder created but could not open it: {error}"
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            self.notice = Some(error.to_string());
+                            self.editor = Some(editor);
+                        }
+                    }
+                    return;
+                }
                 if value.is_empty() {
                     return;
                 }
-                let path = match field {
-                    Field::Create => create_folder(&self.current, value),
-                    _ => Ok(self.current.join(value.trim_matches('"'))),
-                };
-                if let Err(error) = path.and_then(|path| self.open_folder(&path)) {
+                let path = self.current.join(value.trim_matches('"'));
+                if let Err(error) = self.open_folder(&path) {
                     self.notice = Some(trf!(
                         "Не удалось открыть или создать папку: {error}",
                         "Could not open or create the folder: {error}"
@@ -438,7 +452,7 @@ impl Picker<'_> {
             KeyCode::Char('p') => self.action(Action::Path),
             KeyCode::Char('d') => self.action(Action::Drives),
             KeyCode::Char('h') => self.action(Action::Home),
-            KeyCode::Char('n') => self.action(Action::Create),
+            KeyCode::F(7) | KeyCode::Char('n' | 'т') => self.action(Action::Create),
             KeyCode::Char('.') => self.action(Action::Hidden),
             _ => {}
         }
@@ -463,6 +477,62 @@ impl Picker<'_> {
         }
     }
 
+    fn draw_create(&self, out: &mut Stdout, width: usize, editor: &Editor) -> io::Result<()> {
+        let accent = Color::Rgb {
+            r: 181,
+            g: 214,
+            b: 178,
+        };
+        let ink = Color::Rgb {
+            r: 30,
+            g: 37,
+            b: 36,
+        };
+        queue!(
+            out,
+            SetBackgroundColor(accent),
+            SetForegroundColor(ink),
+            SetAttribute(Attribute::Bold)
+        )?;
+        line(out, 0, tr!(" Новая папка ", " New folder "))?;
+        queue!(out, SetAttribute(Attribute::Reset), ResetColor)?;
+        line(out, 2, tr!("Имя папки", "Folder name"))?;
+        queue!(out, SetBackgroundColor(ink), SetForegroundColor(accent))?;
+        line(
+            out,
+            3,
+            &format!(" {}", editor.display(width.saturating_sub(2))),
+        )?;
+        queue!(out, ResetColor)?;
+        let input = editor.value();
+        let target = new_folder_path(&self.current, &input);
+        let preview = match &target {
+            Ok(path) => display(path),
+            Err(_) => display(&self.current),
+        };
+        line(out, 4, tr!("Место создания", "Destination"))?;
+        line(out, 5, &shorten(&preview, width, true))?;
+        if let Some(error) = self.notice.as_deref() {
+            queue!(out, SetForegroundColor(Color::Yellow))?;
+            line(out, 6, &shorten(error, width, false))?;
+            queue!(out, ResetColor)?;
+        } else if !input.trim().is_empty()
+            && let Err(error) = target
+        {
+            line(out, 6, &shorten(&error.to_string(), width, false))?;
+        }
+        line(
+            out,
+            8,
+            &shorten(
+                tr!("Enter Создать  Esc Назад", "Enter Create  Esc Back"),
+                width,
+                false,
+            ),
+        )?;
+        out.flush()
+    }
+
     fn draw(&mut self, out: &mut Stdout, width: u16, height: u16, page: usize) -> io::Result<()> {
         queue!(out, Clear(ClearType::All))?;
         let space = usize::from(width.saturating_sub(4));
@@ -477,6 +547,11 @@ impl Picker<'_> {
                 ))
             )?;
             return out.flush();
+        }
+        if let Some(editor) = &self.editor
+            && editor.field == Field::Create
+        {
+            return self.draw_create(out, space, editor);
         }
         queue!(
             out,
@@ -598,14 +673,11 @@ impl Picker<'_> {
         line(out, height - 2, &shorten(controls, space, false))?;
         if self.editor.is_none() && self.view == View::Folders {
             let shortcuts = if space < 51 {
-                tr!(
-                    "←    / Поиск    Tab    F10 Действия",
-                    "←    / Search    Tab    F10 Actions"
-                )
+                tr!("F7 Новая папка · F10", "F7 New folder · F10")
             } else {
                 tr!(
-                    "← Вверх    / Поиск    Tab Недавние    F10 Действия",
-                    "← Up    / Search    Tab Recent    F10 Actions"
+                    "F7 Новая папка · F10 Действия · / Поиск · Tab Недавние",
+                    "F7 New folder · F10 Actions · / Search · Tab Recent"
                 )
             };
             line(out, height - 1, &shorten(shortcuts, space, false))?;
