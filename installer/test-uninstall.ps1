@@ -31,6 +31,10 @@ foreach ($edition in 'Lite', 'Full') {
     if ((& $launcher --version) -ne "CarryCode $Version" -or $LASTEXITCODE -ne 0) {
         throw "$edition setup installed the wrong launcher."
     }
+    $installedEdition = Get-Content -LiteralPath (Join-Path $destination 'manifests/edition.json') -Raw | ConvertFrom-Json
+    if ($installedEdition -cne $edition.ToLowerInvariant()) {
+        throw "$edition setup installed the wrong edition marker."
+    }
     $uninstaller = @(Get-ChildItem -LiteralPath $destination -Filter 'unins*.exe' -File)
     if ($uninstaller.Count -ne 1) { throw "$edition setup did not create one uninstaller." }
     $entry = Get-ItemProperty -LiteralPath $registryPath

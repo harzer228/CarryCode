@@ -203,7 +203,10 @@ pub(super) fn copy(text: &str) -> Result<()> {
             let destination = GlobalLock(memory).cast::<u16>();
             if destination.is_null() {
                 GlobalFree(memory);
-                anyhow::bail!("Clipboard memory is unavailable");
+                anyhow::bail!(tr!(
+                    "Память буфера обмена недоступна",
+                    "Clipboard memory is unavailable"
+                ));
             }
             destination.copy_from_nonoverlapping(data.as_ptr(), data.len());
             GlobalUnlock(memory);
@@ -211,7 +214,10 @@ pub(super) fn copy(text: &str) -> Result<()> {
                 || SetClipboardData(u32::from(CF_UNICODETEXT), memory).is_null()
             {
                 GlobalFree(memory);
-                anyhow::bail!("Clipboard write failed");
+                anyhow::bail!(tr!(
+                    "Не удалось записать в буфер обмена",
+                    "Clipboard write failed"
+                ));
             }
             Ok(())
         })();
@@ -257,7 +263,10 @@ pub(super) fn copy(text: &str) -> Result<()> {
     );
     let encoded = base64::engine::general_purpose::STANDARD.encode(text);
     let mut stdout = io::stdout().lock();
-    write!(stdout, "\x1b]52;c;{encoded}\x07").context("Terminal clipboard write failed")?;
+    write!(stdout, "\x1b]52;c;{encoded}\x07").context(tr!(
+        "Терминал не записал данные в буфер обмена",
+        "Terminal clipboard write failed"
+    ))?;
     Ok(stdout.flush()?)
 }
 
@@ -280,7 +289,13 @@ pub(super) fn paste() -> Result<Option<String>> {
             }
             let length = GlobalSize(memory) / size_of::<u16>();
             let source = GlobalLock(memory).cast::<u16>();
-            ensure!(!source.is_null(), "Clipboard memory is unavailable");
+            ensure!(
+                !source.is_null(),
+                tr!(
+                    "Память буфера обмена недоступна",
+                    "Clipboard memory is unavailable"
+                )
+            );
             let units = std::slice::from_raw_parts(source, length.min(super::PASTE_LIMIT + 1));
             let text = units
                 .iter()

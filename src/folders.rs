@@ -19,6 +19,19 @@ pub fn pick(start: &Path, root: &Path, recent: &RecentFolders) -> Result<Option<
     picker::run(screen, start, root, recent)
 }
 
+pub fn resolve_directory(start: &Path, input: &str) -> Result<PathBuf> {
+    let path = accessible(
+        &start.join(
+            input
+                .strip_prefix('"')
+                .and_then(|path| path.strip_suffix('"'))
+                .unwrap_or(input),
+        ),
+    )?;
+    selectable(&path)?;
+    Ok(path)
+}
+
 fn pick_by_path(start: &Path) -> Result<Option<PathBuf>> {
     println!("{}", display(start));
     let Some(input) = crate::prompt(tr!(

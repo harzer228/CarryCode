@@ -26,7 +26,7 @@ fn command(task: &str) -> Result<(&'static str, Vec<&'static str>)> {
         "npm-build" => ("npm", vec!["run", "build"]),
         "python-run" => ("python", vec!["main.py"]),
         "python-test" => ("python", vec!["-m", "unittest", "discover"]),
-        _ => bail!("Unknown task"),
+        _ => bail!(tr!("Неизвестная задача", "Unknown task")),
     })
 }
 pub(super) fn available(directory: &Path) -> Vec<&'static str> {
@@ -425,7 +425,10 @@ fn run_process(
         !cancel.load(Ordering::Relaxed),
         "Command canceled before start"
     );
-    let mut process = ProcessTree::spawn(command).context("Could not start the process")?;
+    let mut process = ProcessTree::spawn(command).context(tr!(
+        "Не удалось запустить процесс",
+        "Could not start the process"
+    ))?;
     let started = std::time::Instant::now();
     loop {
         if let Some(status) = process.0.try_wait()? {
@@ -523,11 +526,15 @@ mod tests {
     #[test]
     #[ignore = "requires an installed Windows Python runtime"]
     fn missing_python_dll_is_reported_without_a_system_dialog() -> Result<()> {
-        let paths = std::env::var_os("PATH").context("PATH is missing")?;
+        let paths = std::env::var_os("PATH")
+            .context(tr!("Переменная PATH отсутствует", "PATH is missing"))?;
         let installed = std::env::split_paths(&paths)
             .map(|folder| folder.join("python.exe"))
             .find(|path| path.is_file())
-            .context("An installed Python is required")?;
+            .context(tr!(
+                "Требуется установленный Python",
+                "An installed Python is required"
+            ))?;
         let temp = tempfile::tempdir()?;
         let incomplete = temp.path().join("python.exe");
         std::fs::copy(installed, &incomplete)?;

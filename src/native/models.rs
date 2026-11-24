@@ -715,6 +715,14 @@ pub(super) fn provider_menu(screen: &mut Screen, state: &mut State) -> Result<bo
     match screen.choose(&connection.name, &choices)? {
         Some(0) => {
             if let Some(edited) = screen.edit_connection(connection.id, Some(connection))? {
+                if (
+                    connection.url.as_str(),
+                    connection.protocol,
+                    connection.key.as_str(),
+                ) != (edited.url.as_str(), edited.protocol, edited.key.as_str())
+                {
+                    state.settings.provider_limits.remove(&connection.id);
+                }
                 state.connections[index] = edited;
                 screen.notice(tr!("Провайдер сохранён.", "Provider saved."));
                 return Ok(true);
@@ -740,6 +748,7 @@ pub(super) fn provider_menu(screen: &mut Screen, state: &mut State) -> Result<bo
                 ),
                 &connection.name,
             )? {
+                state.settings.provider_limits.remove(&connection.id);
                 state.connections.remove(index);
                 return Ok(true);
             }
@@ -1073,7 +1082,10 @@ pub(super) fn model_menu(
             let Some(id) = choose_connection(screen, state)? else {
                 return Ok(false);
             };
-            let connection = state.connection(id).context("Missing provider")?.clone();
+            let connection = state
+                .connection(id)
+                .context(tr!("Провайдер не найден", "Missing provider"))?
+                .clone();
             if matches!(action, ModelAction::Catalog) {
                 let settings = import_catalog(screen, state, &connection, history)?;
                 return Ok(add_models(state, id, settings));
@@ -1118,7 +1130,7 @@ pub(super) fn model_menu(
             let saved = &state.models[index];
             let connection = state
                 .connection(saved.connection)
-                .context("Missing provider")?
+                .context(tr!("Провайдер не найден", "Missing provider"))?
                 .clone();
             let original = saved.settings.model.clone();
             let mut draft = saved.settings.clone();
@@ -1157,7 +1169,7 @@ pub(super) fn model_menu(
             let saved = &state.models[index];
             let connection = state
                 .connection(saved.connection)
-                .context("Missing provider")?;
+                .context(tr!("Провайдер не найден", "Missing provider"))?;
             let provider = saved.settings.resolve(connection, DialogMode::Chat);
             screen.busy(tr!("Проверяю модель…", "Testing the model…"))?;
             match probe_provider(&provider) {

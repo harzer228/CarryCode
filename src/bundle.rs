@@ -103,6 +103,27 @@ pub fn runtime(agent: Agent) -> Result<Runtime> {
         .context(tr!("CLI отсутствует во встроенном манифесте. Собери комплект через xtask или распакуй архив релиза.", "The CLI is missing from the embedded manifest. Build the bundle with xtask or extract a release archive."))
 }
 
+pub fn is_full(root: &Path) -> bool {
+    match File::open(root.join("manifests/edition.json")) {
+        Ok(file) => serde_json::from_reader::<_, String>(file.take(128))
+            .is_ok_and(|edition| edition == "full"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            [Agent::Codex, Agent::OpenCode].into_iter().any(|agent| {
+                runtime(agent).is_ok_and(|runtime| {
+                    valid(&runtime.entry)
+                        && root
+                            .join("bin")
+                            .join(PLATFORM)
+                            .join(agent.id())
+                            .join(runtime.entry)
+                            .is_file()
+                })
+            })
+        }
+        Err(_) => false,
+    }
+}
+
 impl Runtime {
     pub fn prepare(&self, root: &Path, staging: Option<&Path>) -> Result<PathBuf> {
         let base = root.join("bin").join(&self.platform).join(&self.agent);

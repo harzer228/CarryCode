@@ -46,7 +46,7 @@ const INPUT_LIMIT: usize = 64 * 1024;
 const PASTE_LIMIT: usize = 192 * 1024;
 
 /// Commands offered by the slash menu. Descriptions are localized.
-fn commands() -> [(&'static str, &'static str); 28] {
+fn commands() -> [(&'static str, &'static str); 29] {
     [
         ("/theme", tr!("Оформление агента", "Agent appearance")),
         (
@@ -66,7 +66,8 @@ fn commands() -> [(&'static str, &'static str); 28] {
         ),
         ("/project", tr!("Создать проект", "Create project")),
         ("/browser", tr!("Скрытый браузер", "Hidden browser")),
-        ("/computer", tr!("Окно Windows", "Windows window")),
+        ("/cd", tr!("Сменить папку проекта", "Change project folder")),
+        ("/setting", tr!("Настройки агента", "Agent settings")),
         ("/tools", tr!("Доступные инструменты", "Available tools")),
         ("/search", tr!("Поиск в интернете", "Search the web")),
         (
@@ -651,6 +652,38 @@ impl Screen {
         Ok(screen)
     }
 
+    pub(super) fn pick_directory(
+        &mut self,
+        directory: &Path,
+        root: &Path,
+        recent: &crate::recent::RecentFolders,
+    ) -> Result<Option<std::path::PathBuf>> {
+        self.leave()?;
+        let picked = crate::folders::pick(directory, root, recent);
+        terminal::enable_raw_mode()?;
+        enter()?;
+        #[cfg(unix)]
+        if self.enhanced_keys {
+            use crossterm::event::{
+                KeyboardEnhancementFlags as Flags, PushKeyboardEnhancementFlags,
+            };
+            execute!(
+                io::stdout(),
+                PushKeyboardEnhancementFlags(
+                    Flags::DISAMBIGUATE_ESCAPE_CODES
+                        | Flags::REPORT_EVENT_TYPES
+                        | Flags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                )
+            )?;
+        }
+        self.cache = None;
+        self.background.clear();
+        self.panel_frame = None;
+        self.viewport = None;
+        self.selection = None;
+        picked
+    }
+
     /// Sets the context window of the active model, used by every ctx readout.
     pub fn set_limits(
         &mut self,
@@ -800,7 +833,7 @@ impl Screen {
                             return Ok(Some(self.submit(&line)));
                         }
                         KeyCode::F(8) if self.desktop_active => {
-                            return Ok(Some("/computer stop".into()));
+                            return Ok(Some(super::desktop::STOP_COMMAND.into()));
                         }
                         #[cfg(windows)]
                         KeyCode::F(7) => self.paste_clipboard(),
@@ -976,7 +1009,7 @@ impl Screen {
                     let items = self.menu(directory);
                     match key.code {
                         KeyCode::F(8) if self.desktop_active => {
-                            return Ok(StreamControl::Command("/computer stop".into()));
+                            return Ok(StreamControl::Command(super::desktop::STOP_COMMAND.into()));
                         }
                         _ if newline_key(key) => {
                             self.editor.insert(['\n']);
@@ -1741,7 +1774,7 @@ impl Screen {
     fn spinner_line(&self, width: usize) -> Line {
         let frame = render::SPIN[(self.tick / 2) % render::SPIN.len()];
         let Some(turn) = self.turn else {
-            return Line::of("  Thinking…", Style::brand());
+            return Line::of(tr!("  Думаю…", "  Thinking…"), Style::brand());
         };
         let elapsed = render::dur(turn.started.elapsed().as_secs());
         let stage = if turn.writing {
@@ -2241,7 +2274,7 @@ impl Screen {
         }
         worker
             .join()
-            .map_err(|_| anyhow::anyhow!("Tool worker stopped"))
+            .map_err(|_| anyhow::anyhow!(tr!("Инструмент остановился", "Tool worker stopped")))
     }
 
     pub(super) fn wait_for_web<T: Send + 'static>(
@@ -2279,7 +2312,10 @@ impl Screen {
             }
         }
         Ok(Some(worker.join().unwrap_or_else(|_| {
-            Err(anyhow::anyhow!("Web worker stopped"))
+            Err(anyhow::anyhow!(tr!(
+                "Веб-запрос остановился",
+                "Web worker stopped"
+            )))
         })))
     }
 
@@ -3030,11 +3066,17 @@ impl Screen {
 
 impl Drop for Screen {
     fn drop(&mut self) {
+        let _ = self.leave();
+    }
+}
+
+impl Screen {
+    fn leave(&mut self) -> io::Result<()> {
         #[cfg(unix)]
         if self.enhanced_keys {
             let _ = execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
         }
-        let _ = execute!(
+        let display = execute!(
             io::stdout(),
             DisableMouseCapture,
             DisableBracketedPaste,
@@ -3043,7 +3085,7 @@ impl Drop for Screen {
             LeaveAlternateScreen,
             Show
         );
-        let _ = terminal::disable_raw_mode();
+        display.and(terminal::disable_raw_mode())
     }
 }
 

@@ -106,7 +106,12 @@ pub fn bundle(root: &Path) -> Result<()> {
             "Repeat the check in an unelevated terminal."
         ),
     );
+    let full = bundle::is_full(root);
     for cli in [bundle::Agent::Codex, bundle::Agent::OpenCode] {
+        if !full {
+            report.skip(cli.name());
+            continue;
+        }
         println!("\n{}", cli.name());
         let files = report.check(
             tr!("Манифест и целостность файлов", "Manifest and file integrity"),

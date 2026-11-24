@@ -315,11 +315,10 @@ fn read_text(path: &Path) -> Result<String> {
 
 /// Full instruction body for a skill; built-ins stay inside the binary.
 pub fn resource(skill: &Skill, relative: &str) -> Result<String> {
-    let base = skill
-        .path
-        .as_deref()
-        .and_then(Path::parent)
-        .context("This skill has no companion files")?;
+    let base = skill.path.as_deref().and_then(Path::parent).context(tr!(
+        "У этого скилла нет дополнительных файлов",
+        "This skill has no companion files"
+    ))?;
     super::read_file(base, relative)
 }
 

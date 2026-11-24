@@ -110,6 +110,70 @@ fn bundle_root() -> Result<std::path::PathBuf> {
         .to_owned())
 }
 
+#[derive(Clone, Copy)]
+enum MenuItem {
+    Native,
+    External(Agent),
+    Troubleshoot,
+    Check,
+    Autostart,
+    Language,
+    Password,
+}
+
+fn menu_items(full: bool) -> Vec<MenuItem> {
+    let mut items = vec![MenuItem::Native];
+    if full {
+        items.extend([
+            MenuItem::External(Agent::Codex),
+            MenuItem::External(Agent::OpenCode),
+            MenuItem::Troubleshoot,
+        ]);
+    }
+    items.extend([
+        MenuItem::Check,
+        MenuItem::Autostart,
+        MenuItem::Language,
+        MenuItem::Password,
+    ]);
+    items
+}
+
+#[cfg(test)]
+#[test]
+fn lite_hides_external_agents_even_over_full() -> Result<()> {
+    let bundle = tempfile::tempdir()?;
+    let manifest = bundle.path().join("manifests");
+    std::fs::create_dir(&manifest)?;
+    let marker = manifest.join("edition.json");
+    std::fs::write(&marker, r#""full""#)?;
+    std::fs::create_dir(bundle.path().join("bin"))?;
+    let full = menu_items(bundle::is_full(bundle.path()));
+    assert!(matches!(
+        full.as_slice(),
+        [
+            MenuItem::Native,
+            MenuItem::External(Agent::Codex),
+            MenuItem::External(Agent::OpenCode),
+            MenuItem::Troubleshoot,
+            ..
+        ]
+    ));
+    std::fs::write(marker, r#""lite""#)?;
+    let lite = menu_items(bundle::is_full(bundle.path()));
+    assert!(matches!(
+        lite.as_slice(),
+        [
+            MenuItem::Native,
+            MenuItem::Check,
+            MenuItem::Autostart,
+            MenuItem::Language,
+            MenuItem::Password
+        ]
+    ));
+    Ok(())
+}
+
 fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> {
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
@@ -142,6 +206,7 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
         }
     };
     let mut workspace = platform::home();
+    let full = bundle::is_full(&resolve_root()?);
     if profile.is_new() {
         // Commit the password before the first agent launch or menu exit.
         profile.save().context(tr!(
@@ -152,19 +217,13 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
             "{}",
             tr!("Пароль профиля сохранён.", "Profile password saved.")
         );
-        if resolve_root()?.join("bin").is_dir()
-            && let Some(agent) = onboard()?
-            && let Err(error) = run_agent(
-                &resolve_root,
-                staged,
-                &mut profile,
-                &mut workspace,
-                agent,
-                agent::Mode::Edit,
+        println!(
+            "{}",
+            tr!(
+                "Профиль переносится вместе с комплектом. Для работы с моделью нужны интернет и подключение к провайдеру. Выбери агент и папку проекта.",
+                "The profile travels with the bundle. Models require internet access and a provider connection. Choose an agent and a project folder."
             )
-        {
-            eprintln!("CarryCode: {error:#}");
-        }
+        );
     }
     loop {
         let startup = match autostart::enabled() {
@@ -172,31 +231,45 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
             Ok(false) => tr!("выкл. — включить", "off — turn on"),
             Err(_) => tr!("статус недоступен", "status unavailable"),
         };
-        println!(
-            "{}",
-            trf!(
-                "\n8  CarryCode Agent (alpha)\n1  Кодить с Codex\n2  Кодить с OpenCode\n3  Разобраться с проблемой\n4  Проверить флешку и соединение\n5  Автозапуск: {startup}\n6  Язык / Language\n7  Сменить пароль\n0  Выйти\n",
-                "\n8  CarryCode Agent (alpha)\n1  Code with Codex\n2  Code with OpenCode\n3  Troubleshoot a problem\n4  Check drive and connection\n5  Autostart: {startup}\n6  Language / Язык\n7  Change password\n0  Exit\n"
-            )
-        );
-        match prompt(tr!("Выбери пункт: ", "Choose an option: "))?.as_deref() {
-            Some("0") | None => {
-                profile.close()?;
-                println!(
-                    "{}",
-                    tr!(
-                        "Сеанс закрыт. Флешку можно извлечь средствами ОС.",
-                        "Session closed. You can now eject the USB drive."
-                    )
-                );
-                return Ok(());
-            }
-            Some(choice @ ("1" | "2")) => {
-                let agent = if choice == "1" {
-                    Agent::Codex
-                } else {
-                    Agent::OpenCode
-                };
+        let items = menu_items(full);
+        println!();
+        for (index, item) in items.iter().enumerate() {
+            let label = match item {
+                MenuItem::Native => "CarryCode Agent CLI".into(),
+                MenuItem::External(agent) => agent.name().into(),
+                MenuItem::Troubleshoot => {
+                    tr!("Разобраться с проблемой", "Troubleshoot a problem").into()
+                }
+                MenuItem::Check => tr!(
+                    "Проверить флешку и соединение",
+                    "Check drive and connection"
+                )
+                .into(),
+                MenuItem::Autostart => trf!("Автозапуск: {startup}", "Autostart: {startup}"),
+                MenuItem::Language => "Язык / Language".into(),
+                MenuItem::Password => tr!("Сменить пароль", "Change password").into(),
+            };
+            println!("{}  {label}", index + 1);
+        }
+        println!("0  {}\n", tr!("Выйти", "Exit"));
+        let input = prompt(tr!("Выбери пункт: ", "Choose an option: "))?;
+        if input.as_deref().is_none_or(|choice| choice == "0") {
+            profile.close()?;
+            println!(
+                "{}",
+                tr!(
+                    "Сеанс закрыт. Флешку можно извлечь средствами ОС.",
+                    "Session closed. You can now eject the USB drive."
+                )
+            );
+            return Ok(());
+        }
+        let selection = input
+            .and_then(|input| input.parse::<usize>().ok())
+            .and_then(|number| number.checked_sub(1))
+            .and_then(|index| items.get(index).copied());
+        match selection {
+            Some(MenuItem::External(agent)) => {
                 let result = run_agent(
                     &resolve_root,
                     staged,
@@ -209,7 +282,7 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                     eprintln!("CarryCode: {error:#}");
                 }
             }
-            Some("3") => {
+            Some(MenuItem::Troubleshoot) => {
                 println!(
                     "{}",
                     tr!(
@@ -245,7 +318,7 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                     eprintln!("CarryCode: {error:#}");
                 }
             }
-            Some("4") => {
+            Some(MenuItem::Check) => {
                 let result = match ask(tr!(
                     "1 — проверить комплект, 2 — проверить HTTPS, 0 — назад: ",
                     "1 — Check the bundle, 2 — Check HTTPS, 0 — Back: "
@@ -270,25 +343,25 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                     eprintln!("CarryCode: {error:#}");
                 }
             }
-            Some("5") => {
+            Some(MenuItem::Autostart) => {
                 let result = autostart::toggle(&resolve_root);
                 if let Err(error) = result {
                     eprintln!("CarryCode: {error:#}");
                 }
             }
-            Some("6") => {
+            Some(MenuItem::Language) => {
                 if let Err(error) = choose_language(&resolve_root) {
                     eprintln!("CarryCode: {error:#}");
                 }
             }
-            Some("8") => {
+            Some(MenuItem::Native) => {
                 let result = (|| -> Result<()> {
                     let root = resolve_root()?;
                     profile.set_root(&root)?;
                     if let Some(directory) = folders::pick(&workspace, &root, &profile.recent)? {
                         workspace = directory;
                         profile.recent.remember(&root, &workspace);
-                        let result = native::run(&mut profile, &root, &workspace);
+                        let result = native::run(&mut profile, &root, &mut workspace);
                         finish_profile(&mut profile, &resolve_root)?;
                         result?;
                     }
@@ -298,7 +371,7 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
                     eprintln!("CarryCode: {error:#}");
                 }
             }
-            Some("7") => match profile.change_password(&resolve_root) {
+            Some(MenuItem::Password) => match profile.change_password(&resolve_root) {
                 Ok(profile::PasswordChange::Canceled) => {}
                 Ok(profile::PasswordChange::Saved) => println!(
                     "{}",
@@ -328,20 +401,6 @@ fn menu(staged: bool, resolve_root: impl Fn() -> Result<PathBuf>) -> Result<()> 
             ),
         }
     }
-}
-
-fn onboard() -> Result<Option<Agent>> {
-    println!(
-        "{}",
-        tr!(
-            "\nПереноси CarryCode между ПК вместе с комплектом на флешке и открывай профиль тем же паролем.\nДля работы с моделью нужен интернет и вход в выбранном CLI. При первом запуске Codex предложит войти, в OpenCode используй /connect.\nВыбери агента, затем папку проекта. В проводнике используй стрелки и Enter.",
-            "\nTake the CarryCode bundle with you on USB and unlock it with the same profile password on another computer.\nAI sessions need internet access and a provider sign-in. Codex prompts you to sign in. In OpenCode, use /connect.\nChoose an agent, then pick the project folder using the arrow keys and Enter."
-        )
-    );
-    choose_agent(tr!(
-        "1 — Codex, 2 — OpenCode, Enter — главное меню: ",
-        "1 — Codex, 2 — OpenCode, Enter — main menu: "
-    ))
 }
 
 fn choose_agent(message: &str) -> Result<Option<Agent>> {
@@ -381,11 +440,11 @@ fn run_agent(
     platform::require_standard_user()?;
     let root = resolve_root()?;
     ensure!(
-        root.join("bin").is_dir(),
+        bundle::is_full(&root),
         "{}",
         tr!(
-            "Codex и OpenCode входят в Full. В Lite выбери пункт 8 — CarryCode Agent.",
-            "Codex and OpenCode are included in Full. In Lite, choose 8 — CarryCode Agent."
+            "Codex и OpenCode входят в Full. В Lite выбери пункт 1 — CarryCode Agent CLI.",
+            "Codex and OpenCode are included in Full. In Lite, choose 1 — CarryCode Agent CLI."
         )
     );
     profile.set_root(&root)?;

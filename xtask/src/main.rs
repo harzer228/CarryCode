@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     env,
     fs::{self, File, OpenOptions},
-    io::{self, BufReader, BufWriter, Read},
+    io::{self, BufReader, BufWriter, Read, Write},
     path::{Component, Path, PathBuf},
     process::Command,
     time::Duration,
@@ -363,6 +363,8 @@ fn package(repo: &Path, dist: &Path, lite: bool) -> Result<()> {
     };
     let mut draft = tempfile::NamedTempFile::new_in(dist)?;
     let mut zip = ZipWriter::new(BufWriter::new(draft.as_file_mut()));
+    zip.start_file("manifests/edition.json", SimpleFileOptions::default())?;
+    zip.write_all(if lite { b"\"lite\"" } else { b"\"full\"" })?;
     for (name, path, executable) in files {
         let options = SimpleFileOptions::default()
             .unix_permissions(if executable { 0o755 } else { 0o644 })
@@ -386,6 +388,45 @@ fn package(repo: &Path, dist: &Path, lite: bool) -> Result<()> {
         format!("{sha}  {name}\n"),
     )?;
     println!("{}", dist.join(name).display());
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn packages_record_the_edition_without_packaging_profile_data() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let repo = fixture.path();
+    let dist = repo.join("dist");
+    for name in [
+        "README.md",
+        "LICENSE",
+        "SECURITY.md",
+        "runtimes.lock.json",
+        "assets/flashgpt.png",
+        "licenses/example.txt",
+        "profile/snapshot.age",
+        "dist/runtime/bin/windows-amd64/codex/bin/codex.exe",
+        "dist/runtime/runtime.json",
+        "dist/launchers/windows-amd64/flashGPT.exe",
+        "dist/launchers/linux-amd64/flashgpt",
+    ] {
+        let path = repo.join(name);
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(path, "fixture")?;
+    }
+    for (lite, edition, filename) in [
+        (true, "lite", "carrycode-lite-amd64.zip"),
+        (false, "full", "flashgpt-usb-amd64.zip"),
+    ] {
+        package(repo, &dist, lite)?;
+        let mut zip = ZipArchive::new(File::open(dist.join(filename))?)?;
+        let marker: String = serde_json::from_reader(zip.by_name("manifests/edition.json")?)?;
+        assert_eq!(marker, edition);
+        assert_eq!(zip.file_names().any(|name| name.starts_with("bin/")), !lite);
+        assert!(!zip.file_names().any(|name| name.starts_with("profile/")));
+        assert!(zip.by_name("flashGPT.exe").is_ok());
+        assert!(zip.by_name("flashgpt").is_ok());
+    }
     Ok(())
 }
 

@@ -125,7 +125,10 @@ pub fn search(settings: &Settings, query: &str) -> Result<String> {
         other => network_error(other),
     })?;
     let body = bounded(response, 512 * 1024)?;
-    let value: Value = serde_json::from_str(&body).context("Search service did not return JSON")?;
+    let value: Value = serde_json::from_str(&body).context(tr!(
+        "Поисковик не вернул JSON",
+        "Search service did not return JSON"
+    ))?;
     let formatted = format_results(&value, source)?;
     if source == SearchSource::Mwmbl {
         Ok(format!("Mwmbl\n\n{formatted}"))
@@ -139,9 +142,10 @@ fn format_results(value: &Value, source: SearchSource) -> Result<String> {
         SearchSource::Searx | SearchSource::Mwmbl => &value["results"],
         SearchSource::Brave => &value["grounding"]["generic"],
     };
-    let items = results
-        .as_array()
-        .context("Unexpected search result format")?;
+    let items = results.as_array().context(tr!(
+        "Неожиданный формат результатов поиска",
+        "Unexpected search result format"
+    ))?;
     let mut output = Vec::new();
     for item in items.iter().take(8) {
         let Some(address) = item["url"].as_str() else {
@@ -243,7 +247,10 @@ fn public_url(input: &str) -> Result<Url> {
             && url.port().is_none(),
         "Expected a public HTTP(S) link"
     );
-    match url.host().context("URL needs a host")? {
+    match url
+        .host()
+        .context(tr!("В URL отсутствует сервер", "URL needs a host"))?
+    {
         url::Host::Domain(name) => ensure!(
             name.contains('.') && !name.ends_with(".local") && !name.ends_with(".localhost"),
             "Expected a public hostname"
@@ -282,11 +289,10 @@ pub fn fetch(address: &str, cancel: &AtomicBool) -> Result<String> {
             .call()
             .map_err(network_error)?;
         if (300..400).contains(&response.status()) {
-            let next = url.join(
-                response
-                    .header("location")
-                    .context("Redirect has no destination")?,
-            )?;
+            let next = url.join(response.header("location").context(tr!(
+                "У перенаправления нет адреса назначения",
+                "Redirect has no destination"
+            ))?)?;
             url = public_url(next.as_str())?;
             continue;
         }
@@ -318,7 +324,7 @@ pub fn fetch(address: &str, cancel: &AtomicBool) -> Result<String> {
         }
         return Ok(text);
     }
-    bail!("Too many redirects")
+    bail!(tr!("Слишком много перенаправлений", "Too many redirects"))
 }
 
 fn bounded(response: ureq::Response, limit: u64) -> Result<String> {

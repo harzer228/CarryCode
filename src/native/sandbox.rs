@@ -157,7 +157,10 @@ fn linux_command(temp: &Path, relative: &Path) -> Result<Command> {
     let executable = ["/usr/bin/bwrap", "/bin/bwrap"]
         .into_iter()
         .find(|path| Path::new(path).is_file())
-        .context("Bubblewrap is not installed")?;
+        .context(tr!(
+            "Bubblewrap не установлен",
+            "Bubblewrap is not installed"
+        ))?;
     let mut command = Command::new(executable);
     command.args([
         "--unshare-all",

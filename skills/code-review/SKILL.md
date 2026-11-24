@@ -34,14 +34,14 @@ it for ordinary explanation of code that the user did not ask to review.
 ## Output format
 
 ```
-Найдено: N (blocker / high / medium / low)
+Findings: N (blocker / high / medium / low)
 
 [severity] file:line — short title
-  Почему: одно-два предложения с конкретным сценарием отказа.
-  Исправление: что именно поменять.
+  Why: one or two sentences with a concrete failure scenario.
+  Fix: the specific change to make.
 ```
 
-Order findings by severity. If there are no findings, say so and name the
+Write the report in the user's language. Order findings by severity. If there are no findings, say so and name the
 checks you performed. Never invent a line number: quote the code you saw.
 
 ## Edits

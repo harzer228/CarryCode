@@ -128,7 +128,7 @@ impl Browser {
             .as_array()
             .and_then(|targets| targets.iter().find(|target| target["type"] == "page"))
             .and_then(|target| target["targetId"].as_str())
-            .context("No browser tab")?;
+            .context(tr!("Нет вкладки браузера", "No browser tab"))?;
         browser.select(first)?;
         Ok(browser)
     }
@@ -263,7 +263,7 @@ impl Browser {
         )?;
         self.session = target["sessionId"]
             .as_str()
-            .context("Tab cannot be opened")?
+            .context(tr!("Не удалось открыть вкладку", "Tab cannot be opened"))?
             .to_owned();
         self.target = id.to_owned();
         for method in [
@@ -282,7 +282,9 @@ impl Browser {
     pub fn call(&mut self, operation: &str, args: &Value) -> Result<(String, Option<String>)> {
         let text = match operation {
             "navigate" => {
-                let address = args["url"].as_str().context("Missing URL")?;
+                let address = args["url"]
+                    .as_str()
+                    .context(tr!("Не указан URL", "Missing URL"))?;
                 let url = url::Url::parse(address)?;
                 ensure!(
                     matches!(url.scheme(), "http" | "https")
@@ -340,12 +342,16 @@ impl Browser {
                 self.select(
                     created["targetId"]
                         .as_str()
-                        .context("Could not create tab")?,
+                        .context(tr!("Не удалось создать вкладку", "Could not create tab"))?,
                 )?;
                 "Tab created".into()
             }
             "select_tab" => {
-                self.select(args["tab"].as_str().context("Missing tab ID")?)?;
+                self.select(
+                    args["tab"]
+                        .as_str()
+                        .context(tr!("Не указан ID вкладки", "Missing tab ID"))?,
+                )?;
                 "Tab selected".into()
             }
             "close_tab" => {
@@ -385,11 +391,10 @@ impl Browser {
                             json!({"url":"about:blank","background":true}),
                             false,
                         )?;
-                        self.select(
-                            next["targetId"]
-                                .as_str()
-                                .context("Could not create replacement tab")?,
-                        )?;
+                        self.select(next["targetId"].as_str().context(tr!(
+                            "Не удалось создать новую вкладку взамен старой",
+                            "Could not create replacement tab"
+                        ))?)?;
                     }
                 }
                 "Tab closed".into()
@@ -413,7 +418,9 @@ impl Browser {
                     json!({"format":"jpeg","quality":65}),
                     true,
                 )?;
-                let image = result["data"].as_str().context("Missing image data")?;
+                let image = result["data"]
+                    .as_str()
+                    .context(tr!("Нет данных снимка", "Missing image data"))?;
                 ensure!(
                     image.len() <= 512 * 1024,
                     "Screenshot exceeds the image limit"
@@ -430,9 +437,10 @@ impl Browser {
                     )?;
                     resolved["nodeIds"][0].as_u64()
                 } else {
-                    let selector = args["selector"]
-                        .as_str()
-                        .context("Enter a node ID from the snapshot or a CSS selector")?;
+                    let selector = args["selector"].as_str().context(tr!(
+                        "Укажи ID элемента из снимка или CSS-селектор",
+                        "Enter a node ID from the snapshot or a CSS selector"
+                    ))?;
                     ensure!(
                         !selector.is_empty() && selector.len() <= 256,
                         "Expected a CSS selector up to 256 bytes"
@@ -445,9 +453,11 @@ impl Browser {
                         .as_u64()
                 }
                 .filter(|node| *node != 0)
-                .context("No matching element")?;
+                .context(tr!("Элемент не найден", "No matching element"))?;
                 if matches!(operation, "type" | "fill") {
-                    let text = args["text"].as_str().context("Missing text")?;
+                    let text = args["text"]
+                        .as_str()
+                        .context(tr!("Нет текста для ввода", "Missing text"))?;
                     ensure!(text.len() <= 8192, "Text exceeds the insertion limit");
                     self.rpc("DOM.focus", json!({"nodeId":node}), true)?;
                     if operation == "fill" {
@@ -459,12 +469,20 @@ impl Browser {
                     self.rpc("DOM.scrollIntoViewIfNeeded", json!({"nodeId":node}), true)?;
                     let quad = self.rpc("DOM.getBoxModel", json!({"nodeId":node}), true)?;
                     let bounds = &quad["model"]["content"];
-                    let x = (bounds[0].as_f64().context("Element has no visible box")?
-                        + bounds[4].as_f64().context("Element has no visible box")?)
-                        / 2.0;
-                    let y = (bounds[1].as_f64().context("Element has no visible box")?
-                        + bounds[5].as_f64().context("Element has no visible box")?)
-                        / 2.0;
+                    let x = (bounds[0].as_f64().context(tr!(
+                        "Границы элемента не видны",
+                        "Element has no visible box"
+                    ))? + bounds[4].as_f64().context(tr!(
+                        "Границы элемента не видны",
+                        "Element has no visible box"
+                    ))?) / 2.0;
+                    let y = (bounds[1].as_f64().context(tr!(
+                        "Границы элемента не видны",
+                        "Element has no visible box"
+                    ))? + bounds[5].as_f64().context(tr!(
+                        "Границы элемента не видны",
+                        "Element has no visible box"
+                    ))?) / 2.0;
                     for kind in ["mousePressed", "mouseReleased"] {
                         self.rpc(
                             "Input.dispatchMouseEvent",
@@ -484,7 +502,10 @@ impl Browser {
                 )?;
                 "Scrolled".into()
             }
-            _ => bail!("Unknown browser action"),
+            _ => bail!(tr!(
+                "Неизвестное действие браузера",
+                "Unknown browser action"
+            )),
         };
         Ok((text, None))
     }

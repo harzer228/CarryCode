@@ -17,7 +17,7 @@
 
 The native agent can create projects, review groups of file changes, and run confirmed PowerShell or Bash commands. Open `/project` for Web, Python, and Rust starters. Use `/tools` for the current tool list.
 
-`/browser` controls installed Chromium, Chrome, or Edge in the background. It exposes the page accessibility tree, console messages and screenshots. Enable **Images** in `/model` to let a vision model inspect a screenshot. On Windows, `/computer` selects a single application window. In `/permissions` or **F6**, choose **Agent** or **Chat only** for the current conversation and choose how to approve actions. New conversations start in Agent mode with **Approve for me**. Changes to the conversation mode or model settings take effect with the next message.
+`/browser` controls installed Chromium, Chrome, or Edge in the background. It exposes the page accessibility tree, console messages and screenshots. Enable **Images** in `/model` to let a vision model inspect a screenshot. On Windows, the agent finds its own target window. Approve desktop access once per chat in Ask or Auto. Full access skips the prompt while desktop control is on. Press **F8** in CarryCode or **Ctrl+Alt+Shift+F12** on the desktop to stop. In `/permissions` or **F6**, choose **Agent** or **Chat only** for the current conversation and choose how to approve actions. New conversations start in Agent mode with **Approve for me**. Changes to the conversation mode or model settings take effect with the next message.
 
 `/search query` sends a web search directly to Mwmbl over the internet in new agent profiles. The built-in option works in Lite and Full without Docker, an API key, or a separate install. Existing profiles can select **Built-in search** in `/search`. Anonymous queries have per-IP limits. The same menu can disable search or connect Brave Search or a SearXNG server with JSON enabled. Press **Esc** to cancel a pending search. [Mwmbl API and limits](https://developer.mwmbl.org/)
 
@@ -31,7 +31,9 @@ Context, input, and output limits can all be the same. CarryCode estimates the i
 
 Use `/theme` to choose CarryCode Sage, Claude Code Inspired, Midnight, or High Contrast.
 
-`/agents` lists the built-in Researcher and Reviewer. The model can propose up to two independent read-only subtasks with `delegate`; CarryCode shows what project excerpts will be shared and asks for approval before starting. Results include file locations; workers cannot edit files, run commands, use MCP or start nested workers.
+`/cd [path]` changes the project folder in the current conversation and preserves its history. `/setting` manages language, appearance, desktop access and delegation limits.
+
+`/agents` lists the built-in Researcher and Reviewer. Set a limit of 0–30 parallel read-only subtasks in `/setting`. The default is two. CarryCode learns explicit concurrency limits for each provider connection; CarryCode shows what project excerpts will be shared and asks for approval before starting. Results include file locations; workers cannot edit files, run commands, use MCP or start nested workers.
 
 In the model form, **←** moves backward through API format and image choices; **→** and **Space** move forward.
 
@@ -76,7 +78,7 @@ To update a flashGPT installation, close the launcher and its CLI clients, then 
 
 ### Uninstall on Windows
 
-If you enabled USB autostart for this bundle, turn it off in menu **5 — Autostart**. Then close CarryCode and its CLI clients. For a Lite or Full setup that includes the uninstaller, use **Settings → Apps → Installed apps**, or run `unins000.exe` from the install folder. Keep the USB drive attached until removal finishes.
+If you enabled USB autostart for this bundle, turn it off in menu **Autostart**. Then close CarryCode and its CLI clients. For a Lite or Full setup that includes the uninstaller, use **Settings → Apps → Installed apps**, or run `unins000.exe` from the install folder. Keep the USB drive attached until removal finishes.
 
 The uninstaller removes the files recorded by Setup and keeps your bundle identity, settings, encrypted profile and project files. To add uninstall support to an older setup, run the newer installer for the same edition in the existing folder. Preserve your data when removing an extracted ZIP manually.
 

@@ -994,21 +994,18 @@ impl Client {
             command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         let mut process = ProcessTree::spawn(command)?;
-        let stdin = process
-            .child_mut()
-            .stdin
-            .take()
-            .context("MCP stdin is unavailable")?;
-        let stdout = process
-            .child_mut()
-            .stdout
-            .take()
-            .context("MCP stdout is unavailable")?;
-        let stderr_pipe = process
-            .child_mut()
-            .stderr
-            .take()
-            .context("MCP stderr is unavailable")?;
+        let stdin = process.child_mut().stdin.take().context(tr!(
+            "Входной поток MCP недоступен",
+            "MCP stdin is unavailable"
+        ))?;
+        let stdout = process.child_mut().stdout.take().context(tr!(
+            "Выходной поток MCP недоступен",
+            "MCP stdout is unavailable"
+        ))?;
+        let stderr_pipe = process.child_mut().stderr.take().context(tr!(
+            "Поток ошибок MCP недоступен",
+            "MCP stderr is unavailable"
+        ))?;
         let (sender, messages) = mpsc::channel();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);

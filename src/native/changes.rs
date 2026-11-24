@@ -127,7 +127,8 @@ impl Batch {
                     before,
                     after,
                 } => {
-                    let original = read(&checked(&root, &path)?)?.context("File does not exist")?;
+                    let original = read(&checked(&root, &path)?)?
+                        .context(tr!("Файл не существует", "File does not exist"))?;
                     let (before, after) = if original.contains("\r\n") {
                         (
                             before.replace("\r\n", "\n").replace('\n', "\r\n"),
@@ -150,7 +151,8 @@ impl Batch {
                     }
                 }
                 Change::Delete { path } => {
-                    let original = read(&checked(&root, &path)?)?.context("File does not exist")?;
+                    let original = read(&checked(&root, &path)?)?
+                        .context(tr!("Файл не существует", "File does not exist"))?;
                     FileChange {
                         path,
                         before: Some(original),
@@ -174,8 +176,10 @@ impl Batch {
                     }
                 }
                 Change::Copy { ref path, ref to } | Change::Move { ref path, ref to } => {
-                    let original =
-                        read(&checked(&root, path)?)?.context("Source file does not exist")?;
+                    let original = read(&checked(&root, path)?)?.context(tr!(
+                        "Исходный файл не существует",
+                        "Source file does not exist"
+                    ))?;
                     ensure!(
                         read(&checked(&root, to)?)?.is_none(),
                         "Destination already exists"
@@ -312,7 +316,10 @@ impl Batch {
             fs::remove_file(path)?;
             return Ok(());
         };
-        let parent = path.parent().context("Missing parent directory")?;
+        let parent = path.parent().context(tr!(
+            "Родительская папка не найдена",
+            "Missing parent directory"
+        ))?;
         let mut current = self.root.clone();
         for component in parent.strip_prefix(&self.root)?.components() {
             current.push(component);

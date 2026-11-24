@@ -33,6 +33,8 @@ pub(super) fn plan_allows_command(command: &str) -> bool {
                 | "/theme"
                 | "/agents"
                 | "/tools"
+                | "/setting"
+                | "/cd"
                 | "/status"
                 | "/continue"
                 | "/quit"
@@ -48,6 +50,7 @@ pub(super) fn plan_allows_command(command: &str) -> bool {
                 | "/clear"
         )
         || command.starts_with("/reasoning ")
+        || command.starts_with("/cd ")
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -100,16 +103,16 @@ impl Mode {
     pub fn description(self) -> &'static str {
         match self {
             Self::Ask => tr!(
-                "Подтверждай правки, команды, открытие страниц и доступ к окнам. Поиск через настроенный сервис запускается сразу.",
-                "Confirm edits, commands, page access and desktop access. Search through the configured service runs immediately."
+                "Подтверждай правки, команды и открытие страниц. Разрешение на рабочий стол запрашивается один раз на чат.",
+                "Confirm edits, commands and page access. Desktop control asks for permission once per chat."
             ),
             Self::Auto => tr!(
-                "Обратимые правки проекта и запуск в песочнице разрешены автоматически.",
-                "Allow reversible project edits and isolated commands automatically."
+                "Обратимые правки и команды в песочнице запускаются автоматически. Доступ к рабочему столу подтверждается один раз на чат.",
+                "Allow reversible edits and isolated commands automatically. Approve desktop control once per chat."
             ),
             Self::Full => tr!(
-                "Доступ к обычным пользовательским файлам и сети в текущем чате. Для запуска вне песочницы по-прежнему нужно отдельное согласие.",
-                "Allow ordinary user files and network in this chat. Commands outside isolation still need separate approval."
+                "Доступ к пользовательским файлам, сети и включённому управлению рабочим столом в этом чате. Запуск вне песочницы требует отдельного согласия.",
+                "Allow user files, network and enabled desktop control in this chat. Commands outside isolation need separate approval."
             ),
         }
     }

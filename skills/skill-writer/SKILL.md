@@ -12,12 +12,12 @@ procedure, not as documentation.
 
 ## Where skills live
 
-| Место | Для чего |
+| Location | Scope |
 | --- | --- |
-| `<project>/.carrycode/skills/<name>/SKILL.md` | только этот проект |
-| `<флешка>/skills/<name>/SKILL.md` | вместе с комплектом CarryCode |
-| `%USERPROFILE%\.carrycode\skills\<name>\SKILL.md` | все проекты пользователя |
-| `%USERPROFILE%\.agents\skills`, `.claude\skills`, `.codex\skills` | читаются как общие, если проекта нет своего |
+| `<project>/.carrycode/skills/<name>/SKILL.md` | This project |
+| `<USB bundle>/skills/<name>/SKILL.md` | Travels with the CarryCode bundle |
+| `%USERPROFILE%\.carrycode\skills\<name>\SKILL.md` | All of the user's projects |
+| `%USERPROFILE%\.agents\skills`, `.claude\skills`, `.codex\skills` | Shared skills available as fallbacks |
 
 The first folder that provides a name wins, so a project skill can override a
 built-in one. Built-ins (`code-review`, `debug-project`, `skill-writer`) are
@@ -60,34 +60,18 @@ complete `SKILL.md`; save it to one of the folders above and run `/skills` in
 CarryCode.
 
 ```
-Ты — автор инструкций для консольного агента CarryCode. Помоги мне сделать
-переиспользуемый скилл в формате SKILL.md.
+Help me write a reusable CarryCode skill as a SKILL.md file.
 
-Контекст агента:
-- агент работает в терминале, видит проект и общается с моделью через JSON-экшены;
-- доступные экшены: read (path), list (path), search (query), edit (path,
-  reason, before, after), run (task: cargo-test, cargo-check, npm-test,
-  npm-build, python-test), plan (text), skill (name), mcp (server, tool,
-  arguments);
-- edit меняет только существующий файл точной заменой before → after и
-  требует подтверждения пользователя;
-- run требует подтверждения и выполняется с правами пользователя.
+Task: [what the skill should do and when to use it]
+Project: [language, framework, tests and constraints]
+Output: [for example, findings with severity and file locations]
+Restrictions: [for example, require permission before edits]
 
-Моя задача: [что должен делать скилл, в каких ситуациях его вызывать].
-Проект: [язык, фреймворк, тесты, важные ограничения].
-Что должно быть на выходе: [формат, например список находок с severity и
-файлом/строкой].
-Что скилл делать НЕ должен: [запреты, например не менять код без просьбы].
-
-Верни ровно один файл SKILL.md и ничего больше:
-1. YAML front matter между --- с полями name (kebab-case, до 64 символов) и
-   description (1–2 предложения, начинается с глагола, содержит фразы-триггеры
-   на русском, до 400 символов).
-2. Тело на русском: ## Когда использовать, ## Порядок работы (нумерованные
-   шаги с конкретными экшенами), ## Формат ответа, ## Ограничения.
-3. Тело не больше 6 КиБ, без выдуманных инструментов, без секретов.
-4. Если чего-то не хватает для качественного скилла, задай не больше двух
-   уточняющих вопросов, а после ответа выдай файл.
+Return one SKILL.md in the user's language, with YAML front matter containing
+a kebab-case name and a short description. Include usage, workflow, output
+format and limitations. Name only tools that CarryCode provides, respect
+confirmation rules, and keep the body under 6 KiB. Ask at most two questions
+if needed. Omit secrets and machine-specific paths.
 ```
 
 ## Check before saving

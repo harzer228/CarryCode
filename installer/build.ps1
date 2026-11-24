@@ -59,6 +59,10 @@ foreach ($edition in $packages.Keys) {
                 throw "Unexpected profile data in the input ZIP: $path"
             }
         }
+        $recordedEdition = Get-Content -LiteralPath (Join-Path $stage 'manifests/edition.json') -Raw | ConvertFrom-Json
+        if ($recordedEdition -cne $edition.ToLowerInvariant()) {
+            throw "The ZIP edition does not match $edition."
+        }
         if ($edition -eq 'Lite') {
             if (Test-Path -LiteralPath (Join-Path $stage 'bin')) {
                 throw 'Unexpected CLI runtimes in the Lite ZIP.'

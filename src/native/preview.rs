@@ -137,7 +137,7 @@ fn serve(root: &Path, rel: &str) -> Result<(u16, &'static str, Vec<u8>)> {
         "gif" => "image/gif",
         "svg" => "image/svg+xml",
         "webp" => "image/webp",
-        _ => anyhow::bail!("Unsupported asset type"),
+        _ => anyhow::bail!(tr!("Тип файла не поддерживается", "Unsupported asset type")),
     };
     let metadata = fs::metadata(&path)?;
     ensure!(

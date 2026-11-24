@@ -226,9 +226,10 @@ pub(super) fn probe(temp: &Path, relative: &Path, command: &Command) -> Result<(
     if first.is_ok() || !can_stage_runtime(&exe) {
         return first;
     }
-    let install = exe
-        .parent()
-        .context("Runtime installation path is missing")?;
+    let install = exe.parent().context(tr!(
+        "Путь установки среды выполнения не найден",
+        "Runtime installation path is missing"
+    ))?;
     let runtime = temp.join("work/.carrycode-runtime");
     copy_runtime(install, &runtime)?;
     probe_executable(temp, relative, &runtime.join(exe.file_name().unwrap()))
@@ -345,7 +346,10 @@ pub(super) fn execute(
     let mut exe = executable(command)?;
     let staged = work
         .join(".carrycode-runtime")
-        .join(exe.file_name().context("Executable filename is missing")?);
+        .join(exe.file_name().context(tr!(
+            "Имя исполняемого файла не найдено",
+            "Executable filename is missing"
+        ))?);
     if staged.is_file() {
         exe = staged;
     }
@@ -420,7 +424,10 @@ pub(super) fn execute(
             &mut process,
         )
     })
-    .context("Could not launch AppContainer process")?;
+    .context(tr!(
+        "Не удалось запустить процесс в AppContainer",
+        "Could not launch AppContainer process"
+    ))?;
     let _process = unsafe { OwnedHandle::from_raw_handle(process.hProcess) };
     let _thread = unsafe { OwnedHandle::from_raw_handle(process.hThread) };
     if let Err(error) = win(unsafe { AssignProcessToJobObject(job, process.hProcess) }) {
